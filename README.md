@@ -77,7 +77,8 @@ Inserire il diagramma qui:
 
 ## 4.2 DFD Livello 1
 
-<img width="4995" height="4234" alt="image" src="https://github.com/user-attachments/assets/0da40481-aeca-4947-85c9-1bbdf9d7dda5" />
+<img width="1208" height="568" alt="DFD_Yomu" src="https://github.com/user-attachments/assets/40e122fc-0e5a-4231-afc8-d754c54fa829" />
+
 
 | ID Processo | Nome Processo | Descrizione |
 |------------|--------------|------------|
@@ -176,7 +177,8 @@ Il database di Yomu è progettato per essere snello, poiché gran parte dei dati
 | Genera	| UTENTE - PROGRESSO |	1 : N	| L'utente genera diversi record di progresso (uno per manga). |
 
 Inserire il diagramma E/R qui.
-<img width="8192" height="2956" alt="image" src="https://github.com/user-attachments/assets/96b41373-a116-463e-a0f0-2ee5d32ef266" />
+<img width="630" height="531" alt="Schema_E_R_Yomu" src="https://github.com/user-attachments/assets/c857659b-24a4-4d47-9259-b17a61f45148" />
+
 
 ---
 
@@ -206,6 +208,27 @@ Per costruire l'interfaccia sono stati utilizzati i seguenti componenti nativi e
 - **Tabelle dati**: Motore di rendering basato su `CustomScrollView` combinato con `SliverGrid` (per le griglie delle copertine) e `SliverList` (per i capitoli e la cronologia), garantendo prestazioni elevate.
 - **Dashboard**: Utilizzo di `ModalBottomSheet` per mostrare menu contestuali non invasivi (es. selezione stato lettura, filtri di esplorazione) e interfacce a schede scorrevoli.
 - **Notifiche**: Sistema di alert `SnackBar` fluttuanti e arrotondate per fornire feedback visivo immediato (es. "Manga aggiunto alla libreria", errori di connessione o login).
+
+1) Libreria
+<img width="562" height="864" alt="image" src="https://github.com/user-attachments/assets/938e2a16-3a8b-40fd-bd4e-42969a4d547c" />
+
+2)Esplora
+<img width="556" height="865" alt="image" src="https://github.com/user-attachments/assets/4d97af2b-a0f6-43bb-a24b-39f36bc4075c" />
+
+3)Cronologia
+<img width="549" height="865" alt="image" src="https://github.com/user-attachments/assets/59b7e3f5-602a-4a73-b38d-0d9ae563b637" />
+
+4)Impostazioni
+<img width="546" height="916" alt="image" src="https://github.com/user-attachments/assets/fcc1d38b-a3ff-4541-8a5f-c7aecd5d93c1" />
+
+5)Dettagli Opera
+<img width="555" height="913" alt="image" src="https://github.com/user-attachments/assets/4db17b96-e1d0-487b-8b9a-04f1d3ce4ef9" />
+
+6)Chatbot per raccomandazioni
+<img width="554" height="913" alt="image" src="https://github.com/user-attachments/assets/9a1d2f8e-a317-460f-b155-08d88f3da15d" />
+
+7)Lettura effettiva
+<img width="555" height="905" alt="image" src="https://github.com/user-attachments/assets/fffee34c-3c14-471d-ab66-e9ed8554b325" />
 
 ---
 
