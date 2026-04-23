@@ -65,13 +65,18 @@ Il sistema Yomu è basato su un'architettura Client-Server fortemente orientata 
 ## 4.1 Diagramma di Contesto (Livello 0)
 
 **Descrizione:**
-- **Entità esterne:** Utente (Lettore), API Sorgente Manga.
-- **Processo principale del sistema:** Sistema di Lettura Yomu.
-- **Flussi di dati primari:** Input di ricerca e comandi di lettura dall'utente; Flusso di immagini e metadati dall'API; Output visuale e raccomandazioni verso l'utente.
+* **Entità esterne:** Utente (Lettore), API Sorgente Manga (MangaDex), API AI (Motore Chatbot).
+* **Processo principale:** Sistema di Lettura e Gestione Yomu.
+* **Flussi di dati primari:**
+  * Dall'utente verso il sistema: input di ricerca, credenziali, comandi di lettura e interazioni UI.
+  * Dal sistema verso l'utente: interfaccia grafica, visualizzazione capitoli e raccomandazioni personalizzate.
+  * Tra sistema e API Manga: richiesta metadati/immagini e ricezione dei file.
+  * Tra sistema e API AI: invio del contesto della libreria utente e ricezione dei suggerimenti testuali.
 
 Inserire il diagramma qui:
 
-<img width="2180" height="2250" alt="image" src="https://github.com/user-attachments/assets/b11072ed-7e1a-4b2e-9675-c9ff3d18fd19" />
+<img width="621" height="601" alt="DFD_lvl0" src="https://github.com/user-attachments/assets/2d6dbea8-a210-4b37-8c3c-b6c675b44f1d" />
+
 
 ---
 
