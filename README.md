@@ -79,17 +79,25 @@ Inserire il diagramma qui:
 
 <img width="4995" height="4234" alt="image" src="https://github.com/user-attachments/assets/0da40481-aeca-4947-85c9-1bbdf9d7dda5" />
 
-Elencare i processi principali:
-
 | ID Processo | Nome Processo | Descrizione |
 |------------|--------------|------------|
-| P1 | Autenticazione | Gestisce login/registrazione e verifica i token utente. |
-| P2 | Fetching Contenuti | Interroga l'API esterna per popolare catalogo e immagini. |
-| P3 | Gestione Libreria & Progressi | Salva e recupera lo stato di lettura (capitolo/pagina) nel DB. |
-| P4 | Motore Raccomandazioni (Chatbot) | Elabora i dati dell'utente per fornire suggerimenti testuali. |
+| **P1** | Autenticazione | Gestisce login/registrazione e verifica le credenziali. Gestisce il passaggio da Utente Non Loggato a Utente Loggato. |
+| **P2** | Esplorazione e Ricerca | Interroga l'API esterna di MangaDex per popolare il catalogo, eseguire ricerche e filtrare i risultati. Accessibile a tutti. |
+| **P3** | Lettura Capitoli | Gestisce la visualizzazione delle immagini dei manga interrogando l'API esterna. Accessibile a tutti. |
+| **P4** | Gestione Libreria | Permette all'utente loggato di aggiungere/rimuovere opere e aggiornare il loro stato (es. "In lettura", "Completato"). |
+| **P5** | Gestione Progressi | Traccia e salva automaticamente i capitoli e le pagine lette dall'utente loggato, recuperando la cronologia al rientro. |
+| **P6** | Personalizzazione Impostazioni | Gestisce le preferenze utente (es. direzione di lettura, tema cromatico, sfondo) salvandole nella memoria locale del dispositivo. |
+| **P7** | Chatbot Raccomandazioni | *(Opzionale)* Interroga un'API di Intelligenza Artificiale per suggerire letture basate sulla libreria e i progressi dell'utente. |
 
-Flusso tra Processi e Archivi Dati:
-L'Utente si interfaccia inizialmente con P1 per l'accesso, leggendo e scrivendo i dati nel database degli utenti (D1). Una volta dentro, le sue richieste di ricerca e lettura passano attraverso P2, che fa da ponte diretto con l'API Esterna per recuperare i capitoli senza salvarli localmente. Durante la lettura, P3 intercetta i movimenti dell'utente (cambio pagina) e aggiorna costantemente l'archivio della Libreria (D2). Infine, quando l'utente richiede un consiglio, P4 elabora la cronologia di lettura presente in D2 per generare raccomandazioni personalizzate.
+### Flusso tra Processi e Archivi Dati
+
+L'architettura del sistema prevede flussi differenziati in base ai permessi dell'utente. 
+
+L'Utente Non Loggato può interagire con il sistema interrogando P2 per esplorare il catalogo o P3 per leggere capitoli, processi che fungono da ponte diretto e bidirezionale con l'API Esterna. Per sbloccare le funzionalità complete, l'utente interagisce con P1, che legge e scrive i dati nel database degli utenti (DB1), validando la sessione e abilitando i permessi di Utente Loggato.
+
+Una volta loggato, i flussi di lettura si ramificano: le azioni dell'utente passano per P4 e P5, i quali comunicano in modo bidirezionale con i rispettivi archivi (Libreria, DB2 e Progressi, DB3) per salvare lo stato delle opere e aggiornare in tempo reale la cronologia. 
+Parallelamente, qualsiasi utente può interagire con P6 per modificare le preferenze di interfaccia, i cui dati vengono scritti e letti direttamente dalla memoria cache del dispositivo (DB4: Local Storage), garantendo un'esperienza fluida senza gravare sul database principale. 
+Infine, le richieste di consigli di lettura vengono elaborate da P7, che funge da intermediario verso un'API di AI Esterna.
 
 ---
 
@@ -157,7 +165,6 @@ Il database di Yomu è progettato per essere snello, poiché gran parte dei dati
 | Entità | Descrizione |
 |--------|------------|
 | UTENTE |	Contiene i dati di autenticazione e anagrafica base. |
-| MANGA_CACHE |	Entità di supporto. Salva gli ID dell'API esterna, il titolo e l'URL della cover per caricare velocemente la libreria senza chiamare l'API per ogni singolo fumetto. |
 | LIBRERIA |	Entità ponte che traccia quali manga l'utente ha salvato tra i preferiti o sta leggendo. |
 | PROGRESSO |	Traccia l'esatta posizione di lettura (Ultimo capitolo e pagina letta) per un determinato manga. |
 
@@ -166,9 +173,7 @@ Il database di Yomu è progettato per essere snello, poiché gran parte dei dati
 | Relazione | Entità Coinvolte | Cardinalità |
 |-----------|-----------------|-------------|
 | Salva in	| UTENTE - LIBRERIA |	1 : N |	Un utente può avere molti manga nella sua libreria. |
-| Riferisce a |	LIBRERIA - MANGA_CACHE |	N : 1 |	Più utenti possono avere lo stesso manga salvato. |
 | Genera	| UTENTE - PROGRESSO |	1 : N	| L'utente genera diversi record di progresso (uno per manga). |
-| Traccia | PROGRESSO - MANGA_CACHE | N : 1 | Il progresso è associato a uno specifico manga. |
 
 Inserire il diagramma E/R qui.
 <img width="8192" height="2956" alt="image" src="https://github.com/user-attachments/assets/96b41373-a116-463e-a0f0-2ee5d32ef266" />
@@ -183,15 +188,24 @@ Inserire il diagramma E/R qui.
 
 | Pagina | Descrizione | Livello di Accesso |
 |--------|------------|-------------------|
-| | | |
-
+| **Splash Screen** | Schermata di avvio con logo e smistamento automatico basato sulla sessione utente attiva. | Tutti |
+| **Auth Screen** | Interfaccia di Login e Registrazione con validazione dei campi in tempo reale. | Utente Non Loggato |
+| **Main Screen** | Contenitore principale ("Scaffold") che ospita la barra di navigazione inferiore e mantiene lo stato. | Tutti |
+| **Home Screen (Esplora)** | Catalogo interattivo collegato all'API esterna con barra di ricerca e filtri avanzati (BottomSheet). | Tutti |
+| **Library Screen** | Dashboard personale che mostra i manga salvati divisi per stato di lettura (chip dinamici). | Utente Loggato |
+| **History Screen** | Cronologia dinamica che mostra l'esatto capitolo e pagina dell'ultima sessione di lettura. | Utente Loggato |
+| **Manga Detail Screen**| Pagina di dettaglio dell'opera con trama, gestione salvataggi e lista completa dei capitoli. | Tutti |
+| **Reader Screen** | Visualizzatore immersivo a schermo intero con zoom, cambio pagina al tocco e slider direzionale. | Tutti |
+| **Settings Screen** | Pannello per la personalizzazione dell'app (colore tema, verso di lettura, svuotamento cache). | Tutti |
 ## 7.2 Componenti Principali
 
-- Navigazione  
-- Form  
-- Tabelle dati  
-- Dashboard  
-- Notifiche  
+Per costruire l'interfaccia sono stati utilizzati i seguenti componenti nativi e personalizzati:
+
+- **Navigazione**: `BottomNavigationBar` customizzata per il passaggio rapido tra le sezioni principali, supportata da un `IndexedStack` per evitare ricaricamenti inutili dei dati. `SliverAppBar` a scomparsa per massimizzare lo spazio di lettura.
+- **Form**: Campi `TextFormField` con validazione in tempo reale e decorazioni di stato (errore, focus) per i moduli di autenticazione. Barra di ricerca interattiva integrata nella testata.
+- **Tabelle dati**: Motore di rendering basato su `CustomScrollView` combinato con `SliverGrid` (per le griglie delle copertine) e `SliverList` (per i capitoli e la cronologia), garantendo prestazioni elevate.
+- **Dashboard**: Utilizzo di `ModalBottomSheet` per mostrare menu contestuali non invasivi (es. selezione stato lettura, filtri di esplorazione) e interfacce a schede scorrevoli.
+- **Notifiche**: Sistema di alert `SnackBar` fluttuanti e arrotondate per fornire feedback visivo immediato (es. "Manga aggiunto alla libreria", errori di connessione o login).
 
 ---
 
