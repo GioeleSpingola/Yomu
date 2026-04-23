@@ -212,20 +212,32 @@ Per costruire l'interfaccia sono stati utilizzati i seguenti componenti nativi e
 1) Libreria
 <img width="562" height="864" alt="image" src="https://github.com/user-attachments/assets/938e2a16-3a8b-40fd-bd4e-42969a4d547c" />
 
+
+
 2)Esplora
 <img width="556" height="865" alt="image" src="https://github.com/user-attachments/assets/4d97af2b-a0f6-43bb-a24b-39f36bc4075c" />
+
+
 
 3)Cronologia
 <img width="549" height="865" alt="image" src="https://github.com/user-attachments/assets/59b7e3f5-602a-4a73-b38d-0d9ae563b637" />
 
+
+
 4)Impostazioni
 <img width="546" height="916" alt="image" src="https://github.com/user-attachments/assets/fcc1d38b-a3ff-4541-8a5f-c7aecd5d93c1" />
+
+
 
 5)Dettagli Opera
 <img width="555" height="913" alt="image" src="https://github.com/user-attachments/assets/4db17b96-e1d0-487b-8b9a-04f1d3ce4ef9" />
 
+
+
 6)Chatbot per raccomandazioni
 <img width="554" height="913" alt="image" src="https://github.com/user-attachments/assets/9a1d2f8e-a317-460f-b155-08d88f3da15d" />
+
+
 
 7)Lettura effettiva
 <img width="555" height="905" alt="image" src="https://github.com/user-attachments/assets/fffee34c-3c14-471d-ab66-e9ed8554b325" />
