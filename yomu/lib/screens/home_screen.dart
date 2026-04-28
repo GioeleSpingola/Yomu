@@ -29,6 +29,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Set<String> _selectedTags = {};
   Set<String> _selectedStatus = {};
   Set<String> _selectedDemographics = {};
+  String _selectedSort = 'followedCount';
+
+  final Map<String, String> _sortOptions = {
+    'I più popolari': 'followedCount',
+    'I più votati': 'rating',
+    'Le ultime uscite': 'latestUploadedChapter',
+    'Ordine alfabetico': 'title',
+  };
 
   final Map<String, String> _statusOptions = {
     'In corso': 'ongoing',
@@ -133,10 +141,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final demog = _selectedDemographics
         .map((d) => '&publicationDemographic[]=$d')
         .join();
+
     return 'https://api.mangadex.org/manga?includes[]=cover_art'
         '&limit=$_limit&offset=$_offset'
         '&hasAvailableChapters=true'
-        '&contentRating[]=safe&contentRating[]=suggestive'
+        '&contentRating[]=safe' // RIMOSSO 'suggestive' per sicurezza
+        '&order[$_selectedSort]=desc' // AGGIUNTO ORDINAMENTO
         '$search$tags$status$demog';
   }
 
@@ -328,17 +338,50 @@ class _HomeScreenState extends State<HomeScreen> {
                   controller: sc,
                   padding: const EdgeInsets.all(20),
                   children: [
+                    // --- INIZIO NUOVA SEZIONE: ORDINAMENTO ---
                     _filterSection(
-                      label: 'Stato',
-                      icon: Icons.signal_cellular_alt_rounded,
-                      child: _segmentedOptions(
-                        options: _statusOptions,
-                        selected: _selectedStatus,
-                        onToggle: (v) => setModal(() {
-                          _selectedStatus.contains(v)
-                              ? _selectedStatus.remove(v)
-                              : _selectedStatus.add(v);
-                        }),
+                      label: 'Ordina per',
+                      icon: Icons.sort_rounded,
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _sortOptions.entries.map((e) {
+                          final isSel = _selectedSort == e.value;
+                          return GestureDetector(
+                            onTap: () =>
+                                setModal(() => _selectedSort = e.value),
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 180),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isSel
+                                    ? YomuColors.primary
+                                    : YomuColors.surfaceContainerHigh,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: isSel
+                                      ? YomuColors.primary
+                                      : YomuColors.outlineVariant.withOpacity(
+                                          0.4,
+                                        ),
+                                ),
+                              ),
+                              child: Text(
+                                e.key,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: isSel
+                                      ? YomuColors.onPrimary
+                                      : YomuColors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
                       ),
                     ),
                     const SizedBox(height: 22),
@@ -693,7 +736,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   url.isNotEmpty
                       ? Image.network(
                           url,
-                          fit: BoxFit.cover,
+                          fit: BoxFit.contain,
                           errorBuilder: (_, __, ___) => Container(
                             color: YomuColors.surfaceContainerHigh,
                             child: const Icon(
@@ -918,9 +961,11 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
               child: Row(
                 children: [
-                  const Text(
-                    'Ultimi aggiornamenti',
-                    style: TextStyle(
+                  Text(
+                    _sortOptions.entries
+                        .firstWhere((e) => e.value == _selectedSort)
+                        .key,
+                    style: const TextStyle(
                       fontFamily: 'Manrope',
                       fontWeight: FontWeight.w800,
                       fontSize: 22,

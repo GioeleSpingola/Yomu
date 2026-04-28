@@ -388,33 +388,51 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
         }
       }
 
+      // --- NUOVA LOGICA DI SINCRONIZZAZIONE STATO LIBRERIA ---
       if (_isInLibrary && _uniqueChapters.isNotEmpty) {
+        // 1. Calcoliamo come sarà la lista dei capitoli letti DOPO questa azione
+        final futureReadChapters = Set<String>.from(_readChapters);
         if (read) {
-          final mangaPubStatus = widget.manga['attributes']['status'];
-          final latestChapterId = _uniqueChapters.first['id'];
-
-          if ((mangaPubStatus == 'completed' ||
-                  mangaPubStatus == 'cancelled') &&
-              (ids.contains(latestChapterId) ||
-                  _readChapters.contains(latestChapterId))) {
-            await Supabase.instance.client
-                .from('libreria')
-                .update({'status': 'completed'})
-                .eq('user_id', user.id)
-                .eq('manga_id', widget.manga['id']);
-
-            if (mounted) setState(() => _localLibraryStatus = 'completed');
-          }
+          futureReadChapters.addAll(ids);
         } else {
+          futureReadChapters.removeAll(ids);
+        }
+
+        // 2. Controlliamo se l'utente ha letto TUTTO
+        final readCount = _uniqueChapters
+            .where((c) => futureReadChapters.contains(c['id']))
+            .length;
+        final isCaughtUp = readCount == _uniqueChapters.length;
+
+        String? targetStatus;
+
+        if (isCaughtUp) {
+          // Quando tutti i capitoli sono letti ci dà completato... E fin lì.
+          targetStatus = 'completed';
+        } else {
+          // Se NON è tutto letto (es. hai tolto una spunta)
+          if (_localLibraryStatus == 'completed') {
+            // Se prima era completato, ma ora non lo è più, torna in lettura.
+            targetStatus = 'reading';
+          } else if (read && _localLibraryStatus == 'plan_to_read') {
+            // Se metti una spunta e stava "In programma", passa "In lettura".
+            targetStatus = 'reading';
+          }
+          // Nota: Se è "on_hold" o "dropped", NON TOCCA NULLA, proprio come hai chiesto.
+        }
+
+        // Se lo stato calcolato è diverso da quello attuale, aggiorniamo il database
+        if (targetStatus != null && targetStatus != _localLibraryStatus) {
           await Supabase.instance.client
               .from('libreria')
-              .update({'status': 'reading'})
+              .update({'status': targetStatus})
               .eq('user_id', user.id)
               .eq('manga_id', widget.manga['id']);
 
-          if (mounted) setState(() => _localLibraryStatus = 'reading');
+          if (mounted) setState(() => _localLibraryStatus = targetStatus!);
         }
       }
+      // --- FINE LOGICA SINCRONIZZAZIONE ---
 
       if (mounted) {
         setState(() {
@@ -424,6 +442,12 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             _readChapters.removeAll(ids);
             for (final id in ids) {
               _chapterPages.remove(id);
+            }
+
+            // SE NON CI SONO PIÙ CAPITOLI LETTI, RESETTIAMO IL PUNTO DI PARTENZA
+            if (_readChapters.isEmpty) {
+              _lastReadChapterId = null;
+              _lastReadPage = 1;
             }
           }
         });
@@ -784,22 +808,6 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
     );
   }
 
-  // REINSERITA LA FUNZIONE _formatDate
-  String? _formatDate(dynamic raw) {
-    if (raw == null) return null;
-    try {
-      final dt = DateTime.parse(raw as String).toLocal();
-      final diff = DateTime.now().difference(dt);
-      if (diff.inDays < 1) return 'Oggi';
-      if (diff.inDays == 1) return 'Ieri';
-      if (diff.inDays < 7) return '${diff.inDays}g fa';
-      if (diff.inDays < 30) return '${(diff.inDays / 7).floor()}sett fa';
-      return '${dt.day}/${dt.month}/${dt.year}';
-    } catch (_) {
-      return null;
-    }
-  }
-
   Widget _buildHeader(
     String description,
     String status,
@@ -807,7 +815,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
     List<String> tags,
     String? author,
   ) {
-    // Verifichiamo se l'utente è "in pari" controllando se l'ultimo capitolo disponibile è stato letto
+    // Verifichiamo se l'utente è "in pari" contando se TUTTI i capitoli sono stati letti
     bool isCaughtUp = false;
     if (_uniqueChapters.isNotEmpty) {
       final readCount = _uniqueChapters
@@ -815,6 +823,9 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
           .length;
       isCaughtUp = readCount == _uniqueChapters.length;
     }
+
+    // Verifichiamo se l'utente ha iniziato a leggere
+    bool hasStartedReading = _readChapters.isNotEmpty;
 
     return SliverToBoxAdapter(
       child: Stack(
@@ -847,20 +858,37 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Hero(
-                      tag: widget.manga['id'] ?? widget.title,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: widget.coverUrl.isNotEmpty
-                            ? Image.network(
-                                widget.coverUrl,
-                                width: 110,
-                                height: 165,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) =>
-                                    _coverPlaceholder(),
-                              )
-                            : _coverPlaceholder(),
+                    // AGGIUNTO IL GESTURE DETECTOR PER INGRANDIRE LA COPERTINA
+                    GestureDetector(
+                      onTap: () {
+                        if (widget.coverUrl.isNotEmpty) {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => FullScreenImageViewer(
+                                imageUrl: widget.coverUrl,
+                                heroTag: widget.manga['id'] ?? widget.title,
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                      child: Hero(
+                        tag: widget.manga['id'] ?? widget.title,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: widget.coverUrl.isNotEmpty
+                              ? Image.network(
+                                  widget.coverUrl,
+                                  width: 110,
+                                  height: 165,
+                                  fit: BoxFit
+                                      .cover, // Teniamo cover qui per estetica della UI
+                                  errorBuilder: (_, __, ___) =>
+                                      _coverPlaceholder(),
+                                )
+                              : _coverPlaceholder(),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -1086,11 +1114,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                                   Icons.check_circle_rounded,
                                   size: 18,
                                 ),
-                                label: Text(
-                                  status == 'COMPLETED'
-                                      ? 'Completato'
-                                      : 'Sei in pari',
-                                ),
+                                label: const Text('Completato'),
                                 style: FilledButton.styleFrom(
                                   disabledBackgroundColor:
                                       YomuColors.surfaceContainerHighest,
@@ -1113,8 +1137,8 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                                   size: 18,
                                 ),
                                 label: Text(
-                                  _lastReadChapterId != null
-                                      ? 'Riprendi'
+                                  hasStartedReading
+                                      ? 'Continua a leggere'
                                       : 'Inizia a leggere',
                                 ),
                                 style: FilledButton.styleFrom(
@@ -1203,34 +1227,76 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
         ),
       );
 
-  void _startReading() {
-    int resumeIdx = _uniqueChapters.length - 1;
-    int startPage = 1;
-
-    // Cerca l'indice del capitolo non letto più vecchio (partendo dal fondo della lista)
-    final unreadIndex = _uniqueChapters.lastIndexWhere(
-      (c) => !_readChapters.contains(c['id']),
-    );
-
-    if (unreadIndex != -1) {
-      resumeIdx = unreadIndex;
-      // Se il capitolo trovato è esattamente quello che avevamo lasciato a metà, ripristina la pagina
-      if (_uniqueChapters[unreadIndex]['id'] == _lastReadChapterId) {
-        startPage = _lastReadPage;
+  Future<void> _startReading() async {
+    // 1. Se c'è già un capitolo nel progresso, usiamo quello (Continua a leggere)
+    if (_lastReadChapterId != null) {
+      int resumeIdx = _uniqueChapters.indexWhere(
+        (c) => c['id'] == _lastReadChapterId,
+      );
+      if (resumeIdx != -1) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ReaderScreen(
+              mangaId: widget.manga['id'],
+              chapters: _uniqueChapters,
+              initialIndex: resumeIdx,
+              initialPage: _lastReadPage,
+            ),
+          ),
+        ).then((_) => _fetchProgress());
+        return;
       }
     }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ReaderScreen(
-          mangaId: widget.manga['id'],
-          chapters: _uniqueChapters,
-          initialIndex: resumeIdx,
-          initialPage: startPage,
-        ),
-      ),
-    ).then((_) => _fetchProgress());
+    // 2. Se non c'è progresso, dobbiamo trovare il vero Capitolo 1
+    // Mostriamo un indicatore di caricamento circolare per non bloccare la UI
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) =>
+          Center(child: CircularProgressIndicator(color: YomuColors.primary)),
+    );
+
+    try {
+      // Facciamo una richiesta specifica a MangaDex per il primissimo capitolo (ordine ASC, limite 1)
+      final url = Uri.parse(
+        'https://api.mangadex.org/manga/${widget.manga['id']}/feed'
+        '?translatedLanguage[]=en&order[chapter]=asc&limit=1',
+      );
+      final r = await http.get(url);
+
+      if (!mounted) return;
+      Navigator.pop(context); // Chiude il loader
+
+      if (r.statusCode == 200) {
+        final data = json.decode(r.body);
+        final firstChapters = data['data'] as List;
+
+        if (firstChapters.isNotEmpty) {
+          final firstChapter = firstChapters.first;
+
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ReaderScreen(
+                mangaId: widget.manga['id'],
+                chapters: [firstChapter], // Carichiamo il primo capitolo
+                initialIndex: 0,
+                initialPage: 1,
+              ),
+            ),
+          ).then((_) => _fetchProgress());
+        } else {
+          _snack('Nessun capitolo disponibile per iniziare.');
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.pop(context);
+        _snack('Errore nel recupero del primo capitolo', isError: true);
+      }
+    }
   }
 
   Widget _buildChapterSectionHeader() {
@@ -1255,7 +1321,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
       return _hasMoreChapters
           ? Center(
               child: Padding(
-                padding: const EdgeInsets.all(20),
+                padding: EdgeInsets.all(20),
                 child: CircularProgressIndicator(
                   color: YomuColors.primary,
                   strokeWidth: 2,
@@ -1269,7 +1335,11 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
     final chapId = chapter['id'] as String;
     final chapNum = chapter['attributes']['chapter']?.toString() ?? '?';
     final chapTitle = (chapter['attributes']['title'] as String?) ?? '';
-    final dateStr = _formatDate(chapter['attributes']['publishAt']);
+    final rawDate = chapter['attributes']['publishAt'];
+    DateTime? chapDate;
+    if (rawDate != null) {
+      chapDate = DateTime.parse(rawDate as String).toLocal();
+    }
     final isRead = _readChapters.contains(chapId);
     final savedPage = _chapterPages[chapId];
     final inProgress = savedPage != null && savedPage > 1 && !isRead;
@@ -1338,7 +1408,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                             ),
                           ),
                           child: isSelected
-                              ? Icon(
+                              ? const Icon(
                                   Icons.check_rounded,
                                   size: 13,
                                   color: YomuColors.onPrimary,
@@ -1422,9 +1492,9 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                               ),
                             ),
                           )
-                        else if (dateStr != null)
+                        else if (chapDate != null)
                           Text(
-                            dateStr,
+                            '${chapDate.day}/${chapDate.month}/${chapDate.year}',
                             style: const TextStyle(
                               fontSize: 11,
                               color: YomuColors.outlineVariant,
@@ -1574,7 +1644,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             SliverToBoxAdapter(
               child: Center(
                 child: Padding(
-                  padding: const EdgeInsets.all(32),
+                  padding: EdgeInsets.all(32),
                   child: CircularProgressIndicator(color: YomuColors.primary),
                 ),
               ),
@@ -1601,6 +1671,60 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
 
           const SliverToBoxAdapter(child: SizedBox(height: 40)),
         ],
+      ),
+    );
+  }
+}
+
+// NUOVO WIDGET PER VISUALIZZARE L'IMMAGINE A SCHERMO INTERO
+class FullScreenImageViewer extends StatelessWidget {
+  final String imageUrl;
+  final Object heroTag;
+
+  const FullScreenImageViewer({
+    super.key,
+    required this.imageUrl,
+    required this.heroTag,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black, // Sfondo nero immersivo
+      appBar: AppBar(
+        backgroundColor: Colors.transparent, // App bar trasparente
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(
+            Icons.close_rounded,
+            color: Colors.white,
+          ), // Pulsante di chiusura
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      extendBodyBehindAppBar: true, // Lay out dietro l'app bar
+      body: Center(
+        child: InteractiveViewer(
+          // Permette di zoomare l'immagine
+          panEnabled: true,
+          minScale: 0.5,
+          maxScale: 4.0,
+          child: Hero(
+            tag: heroTag, // Il tag deve coincidere per l'animazione
+            child: Image.network(
+              imageUrl,
+              fit: BoxFit
+                  .contain, // Mostra l'intera immagine, adattandola allo schermo
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return const Center(
+                  child:
+                      CircularProgressIndicator(), // Mostra un loader mentre carica l'originale
+                );
+              },
+            ),
+          ),
+        ),
       ),
     );
   }

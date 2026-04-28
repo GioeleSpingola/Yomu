@@ -101,7 +101,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildFilterChips() {
-    final labels = ['Tutti', 'In lettura', 'Completati'];
+    final labels = [
+      'Tutti',
+      'In lettura',
+      'Completati',
+      'In Programma',
+      'In Pausa',
+      'Abbandonati',
+    ];
     return SizedBox(
       height: 40,
       child: ListView.separated(
@@ -366,19 +373,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
           // Filtra la libreria in base alla nuova colonna 'status' presente su Supabase
           List<Map<String, dynamic>> savedManga = _allManga.where((item) {
-            if (_filterIndex == 0) return true;
+            if (_filterIndex == 0) return true; // 0 = Tutti
 
             final mId = item['manga_id']?.toString();
             if (mId == null || mId == 'null') return false;
 
             final status = item['status'] as String?;
 
-            if (_filterIndex == 1) {
-              return status == 'reading' || status == null;
-            } else if (_filterIndex == 2) {
-              return status == 'completed';
+            // Mappiamo l'indice del chip con lo status corrispondente nel database
+            switch (_filterIndex) {
+              case 1: // In lettura
+                return status == 'reading' || status == null;
+              case 2: // Completati
+                return status == 'completed';
+              case 3: // In Programma
+                return status == 'plan_to_read';
+              case 4: // In Pausa
+                return status == 'on_hold';
+              case 5: // Abbandonati
+                return status == 'dropped';
+              default:
+                return true;
             }
-            return true;
           }).toList();
 
           final count = savedManga.length;
@@ -405,11 +421,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
               const SliverToBoxAdapter(child: SizedBox(height: 12)),
               if (librarySnapshot.connectionState == ConnectionState.waiting &&
                   _allManga.isEmpty)
-                 SliverFillRemaining(
+                SliverFillRemaining(
                   child: Center(
-                    child: CircularProgressIndicator(
-                      color: YomuColors.primary,
-                    ),
+                    child: CircularProgressIndicator(color: YomuColors.primary),
                   ),
                 )
               else if (savedManga.isEmpty)
@@ -544,7 +558,7 @@ class MangaSearchDelegate extends SearchDelegate {
                     coverUrl,
                     width: 40,
                     height: 60,
-                    fit: BoxFit.cover,
+                    fit: BoxFit.contain,
                   ),
                 )
               : Container(

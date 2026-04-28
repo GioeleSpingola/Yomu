@@ -260,7 +260,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     onPressed: _signIn,
                     style: FilledButton.styleFrom(
                       backgroundColor: YomuColors.primary,
-                      foregroundColor: YomuColors.primary,
+                      foregroundColor: YomuColors.onPrimary,
                       minimumSize: const Size(double.infinity, 52),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),

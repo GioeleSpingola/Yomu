@@ -265,7 +265,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           coverUrl.isNotEmpty
                               ? Image.network(
                                   coverUrl,
-                                  fit: BoxFit.cover,
+                                  fit: BoxFit.contain,
                                   color: isRead ? Colors.grey : null,
                                   colorBlendMode: isRead
                                       ? BlendMode.saturation
