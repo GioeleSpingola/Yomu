@@ -82,7 +82,9 @@ Inserire il diagramma qui:
 
 ## 4.2 DFD Livello 1
 
-<img width="1208" height="568" alt="DFD_Yomu" src="https://github.com/user-attachments/assets/40e122fc-0e5a-4231-afc8-d754c54fa829" />
+
+<img width="1427" height="888" alt="image" src="https://github.com/user-attachments/assets/c56452e4-c6e7-48b0-80ab-928097a5dd1e" />
+
 
 
 | ID Processo | Nome Processo | Descrizione |
@@ -196,7 +198,8 @@ Il database di Yomu è progettato per essere snello, poiché gran parte dei dati
 | Produce | UTENTE - STATISTICHE_GIORNALIERE - STATISTICHE_LETTURA | 1 : N | Un utente genera un record di statistiche per ogni giorno di utilizzo. Inoltre aumenta i minuti di lettura |
 
 Inserire il diagramma E/R qui.
-<img width="630" height="531" alt="Schema_E_R_Yomu" src="https://github.com/user-attachments/assets/c857659b-24a4-4d47-9259-b17a61f45148" />
+<img width="942" height="790" alt="image" src="https://github.com/user-attachments/assets/3da047a0-4905-40f5-8572-80034c74e25f" />
+
 
 
 ---
