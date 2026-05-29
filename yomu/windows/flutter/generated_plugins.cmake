@@ -4,6 +4,11 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   app_links
+  battery_plus
+  connectivity_plus
+  file_selector_windows
+  local_auth_windows
+  share_plus
   url_launcher_windows
 )
 

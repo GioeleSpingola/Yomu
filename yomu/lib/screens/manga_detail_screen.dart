@@ -2,10 +2,17 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'auth_screen.dart';
 import 'reader_screen.dart';
+import 'ai_chat_screen.dart';
+import 'main_screen.dart';
 import '../yomu_colors.dart';
+import '../Lingue/app_localizations.dart';
+import 'package:share_plus/share_plus.dart';
+
 
 class MangaDetailScreen extends StatefulWidget {
   final dynamic manga;
@@ -27,11 +34,6 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   final List<dynamic> _uniqueChapters = [];
   final Set<String> _seenChapters = {};
   bool _isLoadingChapters = true;
-  bool _isLoadingMoreChapters = false;
-  bool _hasMoreChapters = true;
-  int _offset = 0;
-  final int _limit = 100;
-  final ScrollController _scrollController = ScrollController();
 
   bool _isInLibrary = false;
   final Set<String> _readChapters = {};
@@ -39,71 +41,181 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   String _localLibraryStatus = 'reading';
   int _lastReadPage = 1;
   final Map<String, int> _chapterPages = {};
+  final Map<String, String> _readDates = {};
 
   bool _selectionMode = false;
   final Set<String> _selectedChapterIds = {};
 
   bool _descExpanded = false;
 
+  String _description = '';
+  String _status = 'UNKNOWN';
+  String? _lastChapter;
+  List<String> _tags = [];
+  Map<String, String> _tagIdMap = {};
+  String? _author;
+  bool _renderDescImages = false;
+  bool _isFetchingDetails = false;
+
   @override
   void initState() {
     super.initState();
+    _loadPrefs();
+    _initMangaData();
     _fetchChapters();
     _checkLibraryStatus();
     _fetchProgress();
-    _scrollController.addListener(() {
-      if (_scrollController.position.pixels >=
-              _scrollController.position.maxScrollExtent - 300 &&
-          !_isLoadingMoreChapters &&
-          _hasMoreChapters) {
-        _fetchMoreChapters();
-      }
-    });
   }
 
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  String _getStatusText(String status) {
-    switch (status) {
-      case 'reading':
-        return 'In Lettura';
-      case 'plan_to_read':
-        return 'In Programma';
-      case 'completed':
-        return 'Completato';
-      case 'on_hold':
-        return 'In Pausa';
-      case 'dropped':
-        return 'Abbandonato';
-      default:
-        return 'In Lettura';
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _renderDescImages = prefs.getBool('renderDescImages') ?? false;
+      });
     }
   }
 
-  IconData _getStatusIcon(String status) {
+  void _initMangaData() {
+    final attrs = widget.manga['attributes'];
+    _description = (attrs?['description']?['en'] as String?) ?? '';
+    _status = (attrs?['status']?.toString() ?? 'unknown').toUpperCase();
+    _lastChapter = attrs?['lastChapter']?.toString();
+
+    final rawTags = attrs?['tags'] as List? ?? [];
+    _tags = rawTags
+        .map((t) => (t['attributes']['name']['en'] ?? '') as String)
+        .where((s) => s.isNotEmpty)
+        .toList();
+    _tagIdMap = {};
+    for (final t in rawTags) {
+      final name = (t['attributes']?['name']?['en'] ?? '') as String;
+      final id = (t['id'] ?? '') as String;
+      if (name.isNotEmpty && id.isNotEmpty) _tagIdMap[name] = id;
+    }
+
+    final rels = widget.manga['relationships'] as List?;
+    if (rels != null) {
+      for (final r in rels) {
+        if (r['type'] == 'author') {
+          _author = r['attributes']?['name']?.toString();
+          break;
+        }
+      }
+    }
+
+    if (_description.isEmpty) {
+      _fetchFullMangaDetails();
+    }
+  }
+
+  Future<void> _fetchFullMangaDetails() async {
+    setState(() => _isFetchingDetails = true);
+    try {
+      final url = Uri.parse(
+        'https://api.mangadex.org/manga/${widget.manga['id']}?includes[]=author',
+      );
+
+      final r = await http.get(
+        url,
+        headers: {
+          'User-Agent': 'YomuApp/1.0 (https://github.com/tuo-profilo-github)',
+        },
+      );
+
+      if (r.statusCode == 200 && mounted) {
+        final data = json.decode(r.body)['data'];
+        final attrs = data['attributes'];
+
+        setState(() {
+          _description = (attrs?['description']?['en'] as String?) ?? '';
+          _status = (attrs?['status']?.toString() ?? 'unknown').toUpperCase();
+          _lastChapter = attrs?['lastChapter']?.toString();
+
+          _tags =
+              (attrs?['tags'] as List?)
+                  ?.map((t) => (t['attributes']['name']['en'] ?? '') as String)
+                  .where((s) => s.isNotEmpty)
+                  .toList() ??
+              [];
+
+          final rels = data['relationships'] as List?;
+          if (rels != null) {
+            for (final rel in rels) {
+              if (rel['type'] == 'author') {
+                _author = rel['attributes']?['name']?.toString();
+                break;
+              }
+            }
+          }
+          _isFetchingDetails = false;
+        });
+      } else {
+        if (mounted) setState(() => _isFetchingDetails = false);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isFetchingDetails = false);
+    }
+  }
+
+  Future<void> _updateLibraryCounts() async {
+    if (!_isInLibrary) return;
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      final int capitoliLettiReali = _readChapters.length;
+      final int capitoliTotali = _uniqueChapters.length;
+
+      String nuovoStatus = _localLibraryStatus;
+
+      if (capitoliTotali > 0 && capitoliLettiReali >= capitoliTotali) {
+        nuovoStatus = 'completed';
+      } else if (nuovoStatus == 'completed' &&
+          capitoliLettiReali < capitoliTotali) {
+        nuovoStatus = 'reading';
+      }
+
+      if (mounted && nuovoStatus != _localLibraryStatus) {
+        setState(() {
+          _localLibraryStatus = nuovoStatus;
+        });
+      }
+
+      await Supabase.instance.client
+          .from('libreria')
+          .update({
+            'capitoli_letti': capitoliLettiReali,
+            'capitoli_totali': capitoliTotali,
+            'status': nuovoStatus,
+          })
+          .eq('user_id', user.id)
+          .eq('manga_id', widget.manga['id']);
+    } catch (_) {}
+  }
+
+  String _getStatusText(BuildContext context, String status) {
+    final loc = AppLocalizations.of(context)!;
     switch (status) {
       case 'reading':
-        return Icons.menu_book_rounded;
+        return loc.translate('library_tab_reading');
       case 'plan_to_read':
-        return Icons.schedule_rounded;
+        return loc.translate('library_tab_planned');
       case 'completed':
-        return Icons.check_circle_rounded;
+        return loc.translate('library_tab_completed');
       case 'on_hold':
-        return Icons.pause_circle_filled_rounded;
+        return loc.translate('library_tab_on_hold');
       case 'dropped':
-        return Icons.cancel_rounded;
+        return loc.translate('library_tab_dropped');
       default:
-        return Icons.menu_book_rounded;
+        return loc.translate('library_tab_reading');
     }
   }
 
   void _showStatusDialog() {
+    final loc = AppLocalizations.of(context)!;
     if (!_isInLibrary) {
-      _snack('Aggiungi prima il manga alla libreria!');
+      _snack(loc.translate('detail_add_first'));
       return;
     }
 
@@ -126,27 +238,42 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
-            const Padding(
+            Padding(
               padding: EdgeInsets.all(16.0),
               child: Text(
-                'La tua libreria',
+                loc.translate('detail_your_library'),
                 style: TextStyle(
-                  fontFamily: 'Manrope',
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
                   color: YomuColors.onSurface,
                 ),
               ),
             ),
-            _statusTile('In Lettura', 'reading', Icons.menu_book_rounded),
-            _statusTile('In Programma', 'plan_to_read', Icons.schedule_rounded),
-            _statusTile('Completato', 'completed', Icons.check_circle_rounded),
             _statusTile(
-              'In Pausa',
+              loc.translate('library_tab_reading'),
+              'reading',
+              Icons.menu_book_rounded,
+            ),
+            _statusTile(
+              loc.translate('library_tab_planned'),
+              'plan_to_read',
+              Icons.schedule_rounded,
+            ),
+            _statusTile(
+              loc.translate('library_tab_completed'),
+              'completed',
+              Icons.check_circle_rounded,
+            ),
+            _statusTile(
+              loc.translate('library_tab_on_hold'),
               'on_hold',
               Icons.pause_circle_filled_rounded,
             ),
-            _statusTile('Abbandonato', 'dropped', Icons.cancel_rounded),
+            _statusTile(
+              loc.translate('library_tab_dropped'),
+              'dropped',
+              Icons.cancel_rounded,
+            ),
             const SizedBox(height: 16),
           ],
         ),
@@ -155,6 +282,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   }
 
   Widget _statusTile(String title, String statusValue, IconData icon) {
+    final loc = AppLocalizations.of(context)!;
     final isSelected = _localLibraryStatus == statusValue;
     return ListTile(
       leading: Icon(
@@ -175,29 +303,16 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
         Navigator.pop(context);
         final user = Supabase.instance.client.auth.currentUser;
         if (user == null) return;
-
         try {
-          final response = await Supabase.instance.client
+          await Supabase.instance.client
               .from('libreria')
               .update({'status': statusValue})
               .eq('user_id', user.id)
-              .eq('manga_id', widget.manga['id'].toString())
-              .select();
-
-          if (response.isEmpty) {
-            _snack(
-              'Permesso negato dal Database (Controlla le RLS!)',
-              isError: true,
-            );
-            return;
-          }
-
-          setState(() {
-            _localLibraryStatus = statusValue;
-          });
-          _snack('Stato aggiornato a "$title"');
-        } catch (e) {
-          _snack('Errore durante l\'aggiornamento', isError: true);
+              .eq('manga_id', widget.manga['id'].toString());
+          setState(() => _localLibraryStatus = statusValue);
+          _snack('${loc.translate('detail_status_updated')} "$title"');
+        } catch (_) {
+          _snack(loc.translate('detail_update_error'), isError: true);
         }
       },
     );
@@ -234,82 +349,103 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
           .eq('user_id', user.id)
           .eq('manga_id', widget.manga['id'])
           .order('last_read', ascending: false);
+
       if (mounted) {
         setState(() {
           _readChapters.clear();
           _chapterPages.clear();
+          _readDates.clear();
+
           if (rows.isNotEmpty) {
             _lastReadChapterId = rows.first['chapter_id'];
             _lastReadPage = rows.first['page'] ?? 1;
           }
+
           for (var r in rows) {
-            if (r['is_read'] == true) _readChapters.add(r['chapter_id']);
+            if (r['is_read'] == true) {
+              _readChapters.add(r['chapter_id']);
+              _readDates[r['chapter_id']] = r['last_read'] ?? '';
+            }
             _chapterPages[r['chapter_id']] = r['page'] ?? 1;
           }
         });
+        if (!_isLoadingChapters) _updateLibraryCounts();
       }
     } catch (_) {}
   }
 
-  Future<void> _fetchChapters() async {
-    final url = Uri.parse(
-      'https://api.mangadex.org/manga/${widget.manga['id']}/feed'
-      '?translatedLanguage[]=en&order[chapter]=desc'
-      '&limit=$_limit&offset=$_offset',
-    );
-    try {
-      final r = await http.get(url);
-      if (r.statusCode == 200) {
-        final data = json.decode(r.body);
-        for (var ch in data['data'] as List) {
-          final id = ch['attributes']['chapter'] ?? ch['id'];
-          if (_seenChapters.add(id)) _uniqueChapters.add(ch);
-        }
-        if (mounted) {
-          setState(() {
-            _isLoadingChapters = false;
-            if ((data['data'] as List).length < _limit) {
-              _hasMoreChapters = false;
-            }
-          });
-        }
-      }
-    } catch (_) {
-      if (mounted) setState(() => _isLoadingChapters = false);
+  // 🌟 FUNZIONE DI REFRESH CORRETTA
+  Future<void> _refreshMangaDetails() async {
+    // Forziamo il recupero dei capitoli ripartendo da zero
+    // _fetchChapters() imposterà in automatico _isLoadingChapters a true!
+    await _fetchChapters();
+    await _fetchProgress();
+    await _checkLibraryStatus();
+
+    // Ricarichiamo anche la descrizione se per caso prima aveva fallito
+    if (_description.isEmpty) {
+      await _fetchFullMangaDetails();
     }
   }
 
-  Future<void> _fetchMoreChapters() async {
-    setState(() => _isLoadingMoreChapters = true);
-    _offset += _limit;
-    final url = Uri.parse(
-      'https://api.mangadex.org/manga/${widget.manga['id']}/feed'
-      '?translatedLanguage[]=en&order[chapter]=desc'
-      '&limit=$_limit&offset=$_offset',
-    );
-    try {
-      final r = await http.get(url);
-      if (r.statusCode == 200) {
-        final data = json.decode(r.body);
-        for (var ch in data['data'] as List) {
-          final id = ch['attributes']['chapter'] ?? ch['id'];
-          if (_seenChapters.add(id)) _uniqueChapters.add(ch);
+  Future<void> _fetchChapters() async {
+    if (!mounted) return;
+    setState(() => _isLoadingChapters = true);
+
+    int localOffset = 0;
+    bool hasMore = true;
+    List<dynamic> tempUnique = [];
+    Set<String> tempSeen = {};
+
+    while (hasMore) {
+      final url = Uri.parse(
+        'https://api.mangadex.org/manga/${widget.manga['id']}/feed'
+        '?translatedLanguage[]=en&order[chapter]=desc'
+        '&limit=500&offset=$localOffset',
+      );
+      try {
+        final r = await http.get(url);
+        if (r.statusCode == 200) {
+          final data = json.decode(r.body);
+          final list = data['data'] as List;
+
+          for (var ch in list) {
+            final ext = ch['attributes']['externalUrl'];
+            if (ext != null && ext.toString().isNotEmpty) continue;
+
+            final id = ch['attributes']['chapter'] ?? ch['id'];
+            if (tempSeen.add(id)) tempUnique.add(ch);
+          }
+
+          if (mounted) {
+            setState(() {
+              _uniqueChapters.clear();
+              _uniqueChapters.addAll(tempUnique);
+              if (localOffset == 0) _isLoadingChapters = false;
+            });
+          }
+
+          if (list.length < 500) {
+            hasMore = false;
+          } else {
+            localOffset += 500;
+          }
+        } else {
+          hasMore = false;
         }
-        if (mounted) {
-          setState(() {
-            _isLoadingMoreChapters = false;
-            if ((data['data'] as List).length < _limit) {
-              _hasMoreChapters = false;
-            }
-          });
-        }
+      } catch (_) {
+        hasMore = false;
       }
-    } catch (_) {
-      if (mounted) setState(() => _isLoadingMoreChapters = false);
+    }
+
+    if (mounted) {
+      setState(() => _isLoadingChapters = false);
+      _updateLibraryCounts();
     }
   }
 
   Future<void> _toggleLibrary() async {
+    final loc = AppLocalizations.of(context)!;
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) {
       await Navigator.push(
@@ -328,7 +464,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             .eq('manga_id', widget.manga['id']);
         if (mounted) {
           setState(() => _isInLibrary = false);
-          _snack('Rimosso dalla libreria');
+          _snack(loc.translate('detail_removed'));
         }
       } else {
         await Supabase.instance.client.from('libreria').insert({
@@ -337,17 +473,20 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
           'title': widget.title,
           'cover_url': widget.coverUrl,
           'status': 'reading',
+          'capitoli_totali': _uniqueChapters.length,
+          'capitoli_letti': _readChapters.length,
         });
         if (mounted) {
           setState(() {
             _isInLibrary = true;
             _localLibraryStatus = 'reading';
           });
-          _snack('Aggiunto alla libreria!');
+          _snack(loc.translate('detail_added'));
         }
       }
     } catch (e) {
-      if (mounted) _snack('Errore: $e', isError: true);
+      if (mounted)
+        _snack('${loc.translate('common_error')}: $e', isError: true);
     }
   }
 
@@ -356,6 +495,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   }
 
   Future<void> _bulkSetRead(List<String> ids, bool read) async {
+    final loc = AppLocalizations.of(context)!;
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null || ids.isEmpty) return;
 
@@ -368,7 +508,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             .from('progressi')
             .delete()
             .eq('user_id', user.id)
-            .filter('chapter_id', 'in', subIds);
+            .inFilter('chapter_id', subIds);
 
         if (read) {
           final List<Map<String, dynamic>> payload = subIds
@@ -388,9 +528,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
         }
       }
 
-      // --- NUOVA LOGICA DI SINCRONIZZAZIONE STATO LIBRERIA ---
       if (_isInLibrary && _uniqueChapters.isNotEmpty) {
-        // 1. Calcoliamo come sarà la lista dei capitoli letti DOPO questa azione
         final futureReadChapters = Set<String>.from(_readChapters);
         if (read) {
           futureReadChapters.addAll(ids);
@@ -398,41 +536,22 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
           futureReadChapters.removeAll(ids);
         }
 
-        // 2. Controlliamo se l'utente ha letto TUTTO
-        final readCount = _uniqueChapters
-            .where((c) => futureReadChapters.contains(c['id']))
-            .length;
-        final isCaughtUp = readCount == _uniqueChapters.length;
+        Map<String, dynamic> libraryUpdates = {};
 
-        String? targetStatus;
-
-        if (isCaughtUp) {
-          // Quando tutti i capitoli sono letti ci dà completato... E fin lì.
-          targetStatus = 'completed';
-        } else {
-          // Se NON è tutto letto (es. hai tolto una spunta)
-          if (_localLibraryStatus == 'completed') {
-            // Se prima era completato, ma ora non lo è più, torna in lettura.
-            targetStatus = 'reading';
-          } else if (read && _localLibraryStatus == 'plan_to_read') {
-            // Se metti una spunta e stava "In programma", passa "In lettura".
-            targetStatus = 'reading';
-          }
-          // Nota: Se è "on_hold" o "dropped", NON TOCCA NULLA, proprio come hai chiesto.
+        if (read) {
+          libraryUpdates['last_read'] = DateTime.now()
+              .toUtc()
+              .toIso8601String();
         }
 
-        // Se lo stato calcolato è diverso da quello attuale, aggiorniamo il database
-        if (targetStatus != null && targetStatus != _localLibraryStatus) {
+        if (libraryUpdates.isNotEmpty) {
           await Supabase.instance.client
               .from('libreria')
-              .update({'status': targetStatus})
+              .update(libraryUpdates)
               .eq('user_id', user.id)
               .eq('manga_id', widget.manga['id']);
-
-          if (mounted) setState(() => _localLibraryStatus = targetStatus!);
         }
       }
-      // --- FINE LOGICA SINCRONIZZAZIONE ---
 
       if (mounted) {
         setState(() {
@@ -444,71 +563,36 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
               _chapterPages.remove(id);
             }
 
-            // SE NON CI SONO PIÙ CAPITOLI LETTI, RESETTIAMO IL PUNTO DI PARTENZA
             if (_readChapters.isEmpty) {
               _lastReadChapterId = null;
               _lastReadPage = 1;
             }
           }
         });
+        _updateLibraryCounts();
         _snack(
           read
-              ? '${ids.length} capitoli segnati come letti'
-              : '${ids.length} capitoli non letti',
+              ? '${ids.length} ${loc.translate('detail_marked_read')}'
+              : '${ids.length} ${loc.translate('detail_marked_unread')}',
         );
       }
     } catch (e) {
-      if (mounted) _snack('Errore nel salvataggio. Riprova.', isError: true);
+      if (mounted) _snack(loc.translate('detail_save_error'), isError: true);
     }
   }
 
   Future<void> _markOlderChaptersAsRead(int index, bool read) async {
-    final currentChap = _uniqueChapters[index];
-    final currentChapNumStr = currentChap['attributes']['chapter'];
-    final currentChapNum = double.tryParse(currentChapNumStr ?? '') ?? 0.0;
-
-    _snack(read ? 'Recupero capitoli da segnare...' : 'Recupero capitoli...');
-
+    final loc = AppLocalizations.of(context)!;
     List<String> targetIds = [];
-    int fetchOffset = 0;
-    bool hasMore = true;
 
-    while (hasMore) {
-      final url = Uri.parse(
-        'https://api.mangadex.org/manga/${widget.manga['id']}/feed'
-        '?translatedLanguage[]=en&order[chapter]=desc'
-        '&limit=500&offset=$fetchOffset',
-      );
-      try {
-        final r = await http.get(url);
-        if (r.statusCode == 200) {
-          final data = json.decode(r.body);
-          final list = data['data'] as List;
-          for (var ch in list) {
-            final chapNumStr = ch['attributes']['chapter'];
-            final chapNum = double.tryParse(chapNumStr ?? '') ?? 0.0;
-
-            if (chapNumStr != null && chapNum < currentChapNum) {
-              targetIds.add(ch['id']);
-            }
-          }
-          if (list.length < 500) {
-            hasMore = false;
-          } else {
-            fetchOffset += 500;
-          }
-        } else {
-          hasMore = false;
-        }
-      } catch (_) {
-        hasMore = false;
-      }
+    for (int i = index + 1; i < _uniqueChapters.length; i++) {
+      targetIds.add(_uniqueChapters[i]['id']);
     }
 
     if (targetIds.isNotEmpty) {
       await _bulkSetRead(targetIds, read);
     } else {
-      _snack('Nessun capitolo precedente trovato.');
+      _snack(loc.translate('detail_no_prev_chapters'));
     }
   }
 
@@ -539,6 +623,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   }
 
   void _showChapterContextMenu(int index) {
+    final loc = AppLocalizations.of(context)!;
     final chapter = _uniqueChapters[index];
     final chapId = chapter['id'] as String;
     final chapNum = chapter['attributes']['chapter']?.toString() ?? '?';
@@ -589,9 +674,8 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                   ),
                   const SizedBox(width: 12),
                   Text(
-                    'Capitolo $chapNum',
-                    style: const TextStyle(
-                      fontFamily: 'Manrope',
+                    '${loc.translate('detail_chapter')} $chapNum',
+                    style: TextStyle(
                       fontWeight: FontWeight.w700,
                       fontSize: 16,
                       color: YomuColors.onSurface,
@@ -607,22 +691,22 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
               endIndent: 20,
             ),
             const SizedBox(height: 4),
-
             _ctxTile(
               icon: isRead
                   ? Icons.radio_button_unchecked_rounded
                   : Icons.check_circle_rounded,
-              label: isRead ? 'Segna come non letto' : 'Segna come letto',
+              label: isRead
+                  ? loc.translate('detail_mark_unread')
+                  : loc.translate('detail_mark_read'),
               color: isRead ? YomuColors.onSurfaceVariant : YomuColors.primary,
               onTap: () {
                 Navigator.pop(context);
                 _setChapterRead(chapId, !isRead);
               },
             ),
-
             _ctxTile(
               icon: Icons.checklist_rounded,
-              label: 'Segna precedenti come letti',
+              label: loc.translate('detail_mark_prev_read'),
               onTap: () {
                 Navigator.pop(context);
                 _markOlderChaptersAsRead(index, true);
@@ -630,23 +714,21 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             ),
             _ctxTile(
               icon: Icons.remove_done_rounded,
-              label: 'Segna precedenti come non letti',
+              label: loc.translate('detail_mark_prev_unread'),
               onTap: () {
                 Navigator.pop(context);
                 _markOlderChaptersAsRead(index, false);
               },
             ),
-
             Divider(
               color: YomuColors.outlineVariant.withOpacity(0.25),
               height: 12,
               indent: 20,
               endIndent: 20,
             ),
-
             _ctxTile(
               icon: Icons.select_all_rounded,
-              label: 'Seleziona tutti',
+              label: loc.translate('detail_select_all'),
               onTap: () {
                 Navigator.pop(context);
                 setState(() {
@@ -659,7 +741,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             ),
             _ctxTile(
               icon: Icons.deselect_rounded,
-              label: 'Seleziona tutti gli altri',
+              label: loc.translate('detail_select_others'),
               onTap: () {
                 Navigator.pop(context);
                 setState(() {
@@ -680,7 +762,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   Widget _ctxTile({
     required IconData icon,
     required String label,
-    Color color = YomuColors.onSurface,
+    Color color = Colors.grey,
     required VoidCallback onTap,
   }) {
     return ListTile(
@@ -701,6 +783,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   }
 
   Widget _buildSelectionBar() {
+    final loc = AppLocalizations.of(context)!;
     final sel = _selectedChapterIds.toList();
     final allRead = sel.every((id) => _readChapters.contains(id));
     final anyRead = sel.any((id) => _readChapters.contains(id));
@@ -719,7 +802,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Text(
-                '${sel.length} selezionati',
+                '${sel.length} ${loc.translate('detail_selected')}',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
@@ -731,7 +814,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             if (!allRead)
               _selBtn(
                 icon: Icons.check_circle_rounded,
-                label: 'Letti',
+                label: loc.translate('detail_read'),
                 onTap: () {
                   _bulkSetRead(sel, true);
                   _exitSelectionMode();
@@ -741,7 +824,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
               const SizedBox(width: 8),
               _selBtn(
                 icon: Icons.radio_button_unchecked_rounded,
-                label: 'Non letti',
+                label: loc.translate('detail_unread'),
                 color: YomuColors.onSurfaceVariant,
                 onTap: () {
                   _bulkSetRead(sel, false);
@@ -795,7 +878,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
       SnackBar(
         content: Text(
           msg,
-          style: const TextStyle(color: YomuColors.onSurface, fontSize: 13),
+          style: TextStyle(color: YomuColors.onSurface, fontSize: 13),
         ),
         backgroundColor: isError
             ? YomuColors.error.withOpacity(0.15)
@@ -808,14 +891,105 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
     );
   }
 
-  Widget _buildHeader(
-    String description,
-    String status,
-    String? lastChapter,
-    List<String> tags,
-    String? author,
-  ) {
-    // Verifichiamo se l'utente è "in pari" contando se TUTTI i capitoli sono stati letti
+  Widget _buildDescriptionContent() {
+    String plainText = _description.replaceAllMapped(
+      RegExp(r'!\[.*?\]\((.*?)\)'),
+      (m) => '[Immagine]',
+    );
+    plainText = plainText.replaceAllMapped(
+      RegExp(r'\[img\](.*?)\[\/img\]', caseSensitive: false),
+      (m) => '[Immagine]',
+    );
+
+    if (!_descExpanded) {
+      return Text(
+        plainText,
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 14,
+          color: YomuColors.onSurfaceVariant,
+          height: 1.5,
+          letterSpacing: 0.1,
+        ),
+      );
+    } else {
+      if (!_renderDescImages) {
+        return Text(
+          plainText,
+          style: TextStyle(
+            fontSize: 14,
+            color: YomuColors.onSurfaceVariant,
+            height: 1.5,
+            letterSpacing: 0.1,
+          ),
+        );
+      }
+
+      List<Widget> children = [];
+      final RegExp imgRegex = RegExp(
+        r'!\[.*?\]\((.*?)\)|\[img\](.*?)\[\/img\]',
+        caseSensitive: false,
+      );
+      int lastMatchEnd = 0;
+
+      for (final match in imgRegex.allMatches(_description)) {
+        if (match.start > lastMatchEnd) {
+          children.add(
+            Text(
+              _description.substring(lastMatchEnd, match.start).trim(),
+              style: TextStyle(
+                fontSize: 14,
+                color: YomuColors.onSurfaceVariant,
+                height: 1.5,
+                letterSpacing: 0.1,
+              ),
+            ),
+          );
+        }
+
+        String? url = match.group(1) ?? match.group(2);
+        if (url != null && url.isNotEmpty) {
+          children.add(
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12.0),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(
+                  url,
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          );
+        }
+        lastMatchEnd = match.end;
+      }
+
+      if (lastMatchEnd < _description.length) {
+        children.add(
+          Text(
+            _description.substring(lastMatchEnd).trim(),
+            style: TextStyle(
+              fontSize: 14,
+              color: YomuColors.onSurfaceVariant,
+              height: 1.5,
+              letterSpacing: 0.1,
+            ),
+          ),
+        );
+      }
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      );
+    }
+  }
+
+  Widget _buildHeader() {
+    final loc = AppLocalizations.of(context)!;
     bool isCaughtUp = false;
     if (_uniqueChapters.isNotEmpty) {
       final readCount = _uniqueChapters
@@ -824,8 +998,8 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
       isCaughtUp = readCount == _uniqueChapters.length;
     }
 
-    // Verifichiamo se l'utente ha iniziato a leggere
-    bool hasStartedReading = _readChapters.isNotEmpty;
+    bool hasStartedReading =
+        _readChapters.isNotEmpty || _lastReadChapterId != null;
 
     return SliverToBoxAdapter(
       child: Stack(
@@ -834,22 +1008,34 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             SizedBox(
               height: 280,
               width: double.infinity,
-              child: ShaderMask(
-                shaderCallback: (rect) => LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Colors.black.withOpacity(0.3), YomuColors.surface],
-                ).createShader(rect),
-                blendMode: BlendMode.darken,
-                child: Image.network(
-                  widget.coverUrl,
-                  fit: BoxFit.cover,
-                  color: Colors.black.withOpacity(0.55),
-                  colorBlendMode: BlendMode.darken,
-                ),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: Opacity(
+                      opacity: 0.4,
+                      child: Image.network(widget.coverUrl, fit: BoxFit.cover),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            YomuColors.surface.withOpacity(0.0),
+                            YomuColors.surface.withOpacity(0.2),
+                            YomuColors.surface.withOpacity(0.7),
+                            YomuColors.surface,
+                          ],
+                          stops: const [0.0, 0.2, 0.65, 1.0],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 88, 16, 0),
             child: Column(
@@ -858,15 +1044,18 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    // AGGIUNTO IL GESTURE DETECTOR PER INGRANDIRE LA COPERTINA
                     GestureDetector(
                       onTap: () {
                         if (widget.coverUrl.isNotEmpty) {
+                          final hqUrl = widget.coverUrl
+                              .replaceAll('.256.jpg', '')
+                              .replaceAll('.512.jpg', '');
+
                           Navigator.push(
                             context,
                             MaterialPageRoute(
                               builder: (_) => FullScreenImageViewer(
-                                imageUrl: widget.coverUrl,
+                                imageUrl: hqUrl,
                                 heroTag: widget.manga['id'] ?? widget.title,
                               ),
                             ),
@@ -882,8 +1071,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                                   widget.coverUrl,
                                   width: 110,
                                   height: 165,
-                                  fit: BoxFit
-                                      .cover, // Teniamo cover qui per estetica della UI
+                                  fit: BoxFit.cover,
                                   errorBuilder: (_, __, ___) =>
                                       _coverPlaceholder(),
                                 )
@@ -901,24 +1089,23 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                             runSpacing: 6,
                             children: [
                               _pill(
-                                status,
+                                _status,
                                 bg: YomuColors.surfaceContainerHighest,
                                 fg: YomuColors.onSurfaceVariant,
                               ),
-                              if (lastChapter != null)
+                              if (_lastChapter != null)
                                 _pill(
-                                  'Cap. $lastChapter',
+                                  '${loc.translate('history_chapter_short')} $_lastChapter',
                                   bg: YomuColors.primary.withOpacity(0.15),
                                   fg: YomuColors.primary,
                                 ),
                             ],
                           ),
-
-                          if (author != null) ...[
+                          if (_author != null) ...[
                             const SizedBox(height: 8),
                             Row(
                               children: [
-                                const Icon(
+                                Icon(
                                   Icons.person_rounded,
                                   size: 13,
                                   color: YomuColors.onSurfaceVariant,
@@ -926,10 +1113,10 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                                 const SizedBox(width: 4),
                                 Flexible(
                                   child: Text(
-                                    author,
+                                    _author!,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       fontSize: 12,
                                       color: YomuColors.onSurfaceVariant,
                                     ),
@@ -938,32 +1125,48 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                               ],
                             ),
                           ],
-
-                          if (tags.isNotEmpty) ...[
+                          if (_tags.isNotEmpty) ...[
                             const SizedBox(height: 10),
                             Wrap(
                               spacing: 5,
                               runSpacing: 5,
-                              children: tags
+                              children: _tags
                                   .take(6)
                                   .map(
-                                    (t) => Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 3,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        border: Border.all(
-                                          color: YomuColors.outlineVariant
-                                              .withOpacity(0.5),
+                                    (t) => GestureDetector(
+                                      onTap: () {
+                                        final tagId = _tagIdMap[t];
+                                        if (tagId == null) return;
+                                        Navigator.pushAndRemoveUntil(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => MainScreen(
+                                              initialTab: 1,
+                                              initialTagId: tagId,
+                                              initialTagName: t,
+                                            ),
+                                          ),
+                                          (route) => false,
+                                        );
+                                      },
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 3,
                                         ),
-                                        borderRadius: BorderRadius.circular(6),
-                                      ),
-                                      child: Text(
-                                        t,
-                                        style: const TextStyle(
-                                          fontSize: 10,
-                                          color: YomuColors.onSurfaceVariant,
+                                        decoration: BoxDecoration(
+                                          border: Border.all(
+                                            color: YomuColors.outlineVariant
+                                                .withOpacity(0.5),
+                                          ),
+                                          borderRadius: BorderRadius.circular(6),
+                                        ),
+                                        child: Text(
+                                          t,
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: YomuColors.onSurfaceVariant,
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -976,57 +1179,49 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                     ),
                   ],
                 ),
-
                 const SizedBox(height: 18),
-
                 Text(
                   widget.title,
-                  style: const TextStyle(
-                    fontFamily: 'Manrope',
+                  style: TextStyle(
                     fontWeight: FontWeight.w800,
                     fontSize: 22,
                     color: YomuColors.onSurface,
                     height: 1.2,
                   ),
                 ),
-
                 const SizedBox(height: 14),
 
-                if (description.isNotEmpty) ...[
-                  GestureDetector(
-                    onTap: () => setState(() => _descExpanded = !_descExpanded),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        AnimatedCrossFade(
-                          duration: const Duration(milliseconds: 250),
-                          crossFadeState: _descExpanded
-                              ? CrossFadeState.showSecond
-                              : CrossFadeState.showFirst,
-                          firstChild: Text(
-                            description,
-                            maxLines: 4,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: YomuColors.onSurfaceVariant,
-                              height: 1.55,
-                            ),
-                          ),
-                          secondChild: Text(
-                            description,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: YomuColors.onSurfaceVariant,
-                              height: 1.55,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Row(
+                if (_isFetchingDetails)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: YomuColors.primary,
+                      ),
+                    ),
+                  )
+                else if (_description.isNotEmpty) ...[
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      AnimatedSize(
+                        duration: const Duration(milliseconds: 250),
+                        alignment: Alignment.topCenter,
+                        child: _buildDescriptionContent(),
+                      ),
+                      const SizedBox(height: 6),
+                      GestureDetector(
+                        onTap: () =>
+                            setState(() => _descExpanded = !_descExpanded),
+                        child: Row(
                           children: [
                             Text(
-                              _descExpanded ? 'Mostra meno' : 'Leggi di più',
+                              _descExpanded
+                                  ? loc.translate('detail_show_less')
+                                  : loc.translate('detail_read_more'),
                               style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
@@ -1042,8 +1237,8 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                             ),
                           ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                 ],
@@ -1076,23 +1271,23 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                               color: YomuColors.primary,
                             ),
                             const SizedBox(width: 8),
-                            const Text(
-                              'Libreria: ',
+                            Text(
+                              loc.translate('detail_library_prefix'),
                               style: TextStyle(
                                 color: YomuColors.onSurfaceVariant,
                                 fontSize: 13,
                               ),
                             ),
                             Text(
-                              _getStatusText(_localLibraryStatus),
-                              style: const TextStyle(
+                              _getStatusText(context, _localLibraryStatus),
+                              style: TextStyle(
                                 color: YomuColors.onSurface,
                                 fontWeight: FontWeight.w700,
                                 fontSize: 13,
                               ),
                             ),
                             const SizedBox(width: 4),
-                            const Icon(
+                            Icon(
                               Icons.arrow_drop_down_rounded,
                               size: 20,
                               color: YomuColors.onSurfaceVariant,
@@ -1102,19 +1297,20 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                       ),
                     ),
                   ),
-
                 if (!_isLoadingChapters && _uniqueChapters.isNotEmpty)
                   Row(
                     children: [
                       Expanded(
                         child: isCaughtUp
                             ? FilledButton.icon(
-                                onPressed: null, // Disabilita il pulsante
-                                icon: const Icon(
+                                onPressed: null,
+                                icon: Icon(
                                   Icons.check_circle_rounded,
                                   size: 18,
                                 ),
-                                label: const Text('Completato'),
+                                label: Text(
+                                  loc.translate('explore_status_completed'),
+                                ),
                                 style: FilledButton.styleFrom(
                                   disabledBackgroundColor:
                                       YomuColors.surfaceContainerHighest,
@@ -1124,7 +1320,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(14),
                                   ),
-                                  textStyle: const TextStyle(
+                                  textStyle: TextStyle(
                                     fontWeight: FontWeight.w700,
                                     fontSize: 14,
                                   ),
@@ -1132,14 +1328,11 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                               )
                             : FilledButton.icon(
                                 onPressed: _startReading,
-                                icon: const Icon(
-                                  Icons.menu_book_rounded,
-                                  size: 18,
-                                ),
+                                icon: Icon(Icons.menu_book_rounded, size: 18),
                                 label: Text(
                                   hasStartedReading
-                                      ? 'Continua a leggere'
-                                      : 'Inizia a leggere',
+                                      ? loc.translate('detail_continue_reading')
+                                      : loc.translate('detail_start_reading'),
                                 ),
                                 style: FilledButton.styleFrom(
                                   backgroundColor: YomuColors.primary,
@@ -1148,7 +1341,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(14),
                                   ),
-                                  textStyle: const TextStyle(
+                                  textStyle: TextStyle(
                                     fontWeight: FontWeight.w700,
                                     fontSize: 14,
                                   ),
@@ -1168,9 +1361,36 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                             : YomuColors.surfaceContainerHigh,
                         onTap: _toggleLibrary,
                       ),
+                      const SizedBox(width: 10),
+                      _squareBtn(
+                        icon: Icons.auto_awesome_rounded,
+                        color: YomuColors.primary,
+                        bg: YomuColors.primary.withOpacity(0.15),
+                        onTap: () {
+                          final contextMsg = '${widget.title}${_author != null ? ' di $_author' : ''}';
+                          Navigator.push(
+                            this.context,
+                            MaterialPageRoute(
+                              builder: (_) => AiChatScreen(currentContext: contextMsg),
+                            ),
+                          );
+                        },
+                      ),
+                      
+                      const SizedBox(width: 10),
+                      _squareBtn(
+                        icon: Icons.ios_share_rounded,
+                        color: YomuColors.onSurface,
+                        bg: YomuColors.surfaceContainerHigh,
+                        onTap: () {
+                          final String mangaId = widget.manga['id'];
+                          // Usiamo un vero link HTTPS che tutti i social riconoscono!
+                          final String shareText = 'Dai un\'occhiata a ${widget.title} su Yomu!\n\nhttps://mangadex.org/title/$mangaId';
+                          Share.share(shareText);
+                        },
+                      ),
                     ],
                   ),
-
                 const SizedBox(height: 28),
               ],
             ),
@@ -1184,10 +1404,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
     width: 110,
     height: 165,
     color: YomuColors.surfaceContainerHigh,
-    child: const Icon(
-      Icons.image_not_supported_rounded,
-      color: YomuColors.outline,
-    ),
+    child: Icon(Icons.image_not_supported_rounded, color: YomuColors.outline),
   );
 
   Widget _squareBtn({
@@ -1228,85 +1445,78 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
       );
 
   Future<void> _startReading() async {
-    // 1. Se c'è già un capitolo nel progresso, usiamo quello (Continua a leggere)
-    if (_lastReadChapterId != null) {
-      int resumeIdx = _uniqueChapters.indexWhere(
-        (c) => c['id'] == _lastReadChapterId,
-      );
-      if (resumeIdx != -1) {
+    final loc = AppLocalizations.of(context)!;
+    final connectivityResult = await Connectivity().checkConnectivity();
+    bool isOffline = false;
+    if (connectivityResult is List) {
+      isOffline = (connectivityResult as List).contains(ConnectivityResult.none);
+    } else {
+      isOffline = connectivityResult == ConnectivityResult.none;
+    }
+    if (isOffline) {
+      _snack(loc.translate('detail_offline_unavailable'), isError: true);
+      return;
+    }
+
+    final bool isWebtoon = _tags.any((t) => t.toLowerCase() == 'long strip' || t.toLowerCase() == 'web comic');
+
+    int targetIndex = -1;
+    int targetPage = 1;
+    for (int i = _uniqueChapters.length - 1; i >= 0; i--) {
+      final chapId = _uniqueChapters[i]['id'];
+      if (!_readChapters.contains(chapId)) {
+        targetIndex = i;
+        targetPage = _chapterPages[chapId] ?? 1;
+        break;
+      }
+    }
+    if (targetIndex != -1) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ReaderScreen(
+            mangaId: widget.manga['id'],
+            chapters: _uniqueChapters,
+            initialIndex: targetIndex,
+            initialPage: targetPage,
+            isWebtoon: isWebtoon,
+          ),
+        ),
+      ).then((_) {
+        _fetchProgress();
+        _checkLibraryStatus();
+      });
+    } else {
+      if (_uniqueChapters.isNotEmpty) {
         Navigator.push(
           context,
           MaterialPageRoute(
             builder: (_) => ReaderScreen(
               mangaId: widget.manga['id'],
               chapters: _uniqueChapters,
-              initialIndex: resumeIdx,
-              initialPage: _lastReadPage,
+              initialIndex: 0,
+              initialPage: 1,
+              isWebtoon: isWebtoon,
             ),
           ),
-        ).then((_) => _fetchProgress());
-        return;
-      }
-    }
-
-    // 2. Se non c'è progresso, dobbiamo trovare il vero Capitolo 1
-    // Mostriamo un indicatore di caricamento circolare per non bloccare la UI
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) =>
-          Center(child: CircularProgressIndicator(color: YomuColors.primary)),
-    );
-
-    try {
-      // Facciamo una richiesta specifica a MangaDex per il primissimo capitolo (ordine ASC, limite 1)
-      final url = Uri.parse(
-        'https://api.mangadex.org/manga/${widget.manga['id']}/feed'
-        '?translatedLanguage[]=en&order[chapter]=asc&limit=1',
-      );
-      final r = await http.get(url);
-
-      if (!mounted) return;
-      Navigator.pop(context); // Chiude il loader
-
-      if (r.statusCode == 200) {
-        final data = json.decode(r.body);
-        final firstChapters = data['data'] as List;
-
-        if (firstChapters.isNotEmpty) {
-          final firstChapter = firstChapters.first;
-
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ReaderScreen(
-                mangaId: widget.manga['id'],
-                chapters: [firstChapter], // Carichiamo il primo capitolo
-                initialIndex: 0,
-                initialPage: 1,
-              ),
-            ),
-          ).then((_) => _fetchProgress());
-        } else {
-          _snack('Nessun capitolo disponibile per iniziare.');
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        Navigator.pop(context);
-        _snack('Errore nel recupero del primo capitolo', isError: true);
+        ).then((_) {
+          _fetchProgress();
+          _checkLibraryStatus();
+        });
+      } else {
+        _snack(loc.translate('detail_no_chapters_start'));
       }
     }
   }
 
   Widget _buildChapterSectionHeader() {
-    return const SliverToBoxAdapter(
+    final loc = AppLocalizations.of(context)!;
+    return SliverToBoxAdapter(
       child: Padding(
         padding: EdgeInsets.fromLTRB(16, 4, 16, 10),
         child: Text(
-          'Capitoli',
+          loc.translate('detail_chapters_section'),
           style: TextStyle(
-            fontFamily: 'Manrope',
             fontSize: 18,
             fontWeight: FontWeight.w800,
             color: YomuColors.onSurface,
@@ -1317,41 +1527,63 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
   }
 
   Widget _buildChapterTile(int index) {
-    if (index == _uniqueChapters.length) {
-      return _hasMoreChapters
-          ? Center(
-              child: Padding(
-                padding: EdgeInsets.all(20),
-                child: CircularProgressIndicator(
-                  color: YomuColors.primary,
-                  strokeWidth: 2,
-                ),
-              ),
-            )
-          : const SizedBox.shrink();
-    }
-
+    final loc = AppLocalizations.of(context)!;
     final chapter = _uniqueChapters[index];
     final chapId = chapter['id'] as String;
     final chapNum = chapter['attributes']['chapter']?.toString() ?? '?';
     final chapTitle = (chapter['attributes']['title'] as String?) ?? '';
+
     final rawDate = chapter['attributes']['publishAt'];
     DateTime? chapDate;
     if (rawDate != null) {
       chapDate = DateTime.parse(rawDate as String).toLocal();
     }
+
     final isRead = _readChapters.contains(chapId);
+    String? readDateRaw = _readDates[chapId];
+    String displayDate = "";
+
+    if (isRead && readDateRaw != null && readDateRaw.isNotEmpty) {
+      String fixedIso = readDateRaw;
+      if (!fixedIso.endsWith('Z') && !fixedIso.contains('+')) {
+        fixedIso += 'Z';
+      }
+      try {
+        DateTime dt = DateTime.parse(fixedIso).toLocal();
+        displayDate =
+            '${loc.translate('detail_read_on')} ${dt.day}/${dt.month}';
+      } catch (_) {
+        displayDate = loc.translate('detail_read_recently');
+      }
+    } else if (chapDate != null) {
+      displayDate = '${chapDate.day}/${chapDate.month}/${chapDate.year}';
+    }
+
     final savedPage = _chapterPages[chapId];
     final inProgress = savedPage != null && savedPage > 1 && !isRead;
     final isSelected = _selectedChapterIds.contains(chapId);
 
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
         if (_selectionMode) {
           _toggleSelection(chapId);
           return;
         }
+        final connectivityResult = await Connectivity().checkConnectivity();
+        bool isOffline = false;
+        if (connectivityResult is List) {
+          isOffline = (connectivityResult as List).contains(ConnectivityResult.none);
+        } else {
+          isOffline = connectivityResult == ConnectivityResult.none;
+        }
+        if (isOffline) {
+          _snack(loc.translate('detail_offline_unavailable'), isError: true);
+          return;
+        }
+        
+        final bool isWebtoon = _tags.any((t) => t.toLowerCase() == 'long strip' || t.toLowerCase() == 'web comic');
         final startPage = _chapterPages[chapId] ?? 1;
+        
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -1360,9 +1592,13 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
               chapters: _uniqueChapters,
               initialIndex: index,
               initialPage: startPage,
+              isWebtoon: isWebtoon,
             ),
           ),
-        ).then((_) => _fetchProgress());
+        ).then((_) {
+          _fetchProgress();
+          _checkLibraryStatus();
+        });
       },
       onLongPress: () => _selectionMode
           ? _toggleSelection(chapId)
@@ -1408,7 +1644,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                             ),
                           ),
                           child: isSelected
-                              ? const Icon(
+                              ? Icon(
                                   Icons.check_rounded,
                                   size: 13,
                                   color: YomuColors.onPrimary,
@@ -1440,27 +1676,30 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                         ),
                       ),
               ),
-
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Capitolo $chapNum',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: isRead
-                            ? YomuColors.outline
-                            : YomuColors.onSurface,
-                      ),
+                    Row(
+                      children: [
+                        Text(
+                          '${loc.translate('detail_chapter')} $chapNum',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: isRead
+                                ? YomuColors.outline
+                                : YomuColors.onSurface,
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 2),
                     Row(
                       children: [
                         if (inProgress) ...[
                           Text(
-                            'Pag. $savedPage',
+                            '${loc.translate('history_page_short')} $savedPage',
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w600,
@@ -1471,7 +1710,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                           Container(
                             width: 3,
                             height: 3,
-                            decoration: const BoxDecoration(
+                            decoration: BoxDecoration(
                               color: YomuColors.outlineVariant,
                               shape: BoxShape.circle,
                             ),
@@ -1492,12 +1731,17 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                               ),
                             ),
                           )
-                        else if (chapDate != null)
+                        else if (displayDate.isNotEmpty)
                           Text(
-                            '${chapDate.day}/${chapDate.month}/${chapDate.year}',
-                            style: const TextStyle(
+                            displayDate,
+                            style: TextStyle(
                               fontSize: 11,
-                              color: YomuColors.outlineVariant,
+                              color: isRead
+                                  ? YomuColors.primary.withOpacity(0.8)
+                                  : YomuColors.outlineVariant,
+                              fontWeight: isRead
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
                             ),
                           ),
                       ],
@@ -1505,15 +1749,14 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
                   ],
                 ),
               ),
-
               if (!_selectionMode)
                 isRead
-                    ? const Icon(
+                    ? Icon(
                         Icons.check_circle_rounded,
                         color: YomuColors.outline,
                         size: 18,
                       )
-                    : const Icon(
+                    : Icon(
                         Icons.chevron_right_rounded,
                         color: YomuColors.outlineVariant,
                         size: 22,
@@ -1527,31 +1770,10 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final attrs = widget.manga['attributes'];
-    final description = (attrs?['description']?['en'] as String?) ?? '';
-    final lastChapter = attrs?['lastChapter']?.toString();
-    final status = (attrs?['status']?.toString() ?? 'unknown').toUpperCase();
-    final tags =
-        (attrs?['tags'] as List?)
-            ?.map((t) => (t['attributes']['name']['en'] ?? '') as String)
-            .where((s) => s.isNotEmpty)
-            .toList() ??
-        [];
-    String? author;
-    final rels = widget.manga['relationships'] as List?;
-    if (rels != null) {
-      for (final r in rels) {
-        if (r['type'] == 'author') {
-          author = r['attributes']?['name']?.toString();
-          break;
-        }
-      }
-    }
-
+    final loc = AppLocalizations.of(context)!;
     return Scaffold(
       backgroundColor: YomuColors.surface,
       extendBodyBehindAppBar: true,
-
       appBar: AppBar(
         backgroundColor: _selectionMode
             ? YomuColors.surfaceContainerHigh
@@ -1582,9 +1804,8 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
         ),
         title: _selectionMode
             ? Text(
-                '${_selectedChapterIds.length} selezionati',
-                style: const TextStyle(
-                  fontFamily: 'Manrope',
+                '${_selectedChapterIds.length} ${loc.translate('detail_selected')}',
+                style: TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 16,
                   color: YomuColors.onSurface,
@@ -1622,7 +1843,7 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
           else
             IconButton(
               icon: Icon(Icons.select_all_rounded, color: YomuColors.primary),
-              tooltip: 'Seleziona tutti',
+              tooltip: loc.translate('detail_select_all'),
               onPressed: () => setState(() {
                 _selectedChapterIds
                   ..clear()
@@ -1631,52 +1852,54 @@ class _MangaDetailScreenState extends State<MangaDetailScreen> {
             ),
         ],
       ),
-
       bottomNavigationBar: _selectionMode ? _buildSelectionBar() : null,
 
-      body: CustomScrollView(
-        controller: _scrollController,
-        slivers: [
-          _buildHeader(description, status, lastChapter, tags, author),
-          _buildChapterSectionHeader(),
-
-          if (_isLoadingChapters)
-            SliverToBoxAdapter(
-              child: Center(
+      // 🌟 IL REFRESH INDICATOR CON L'OFFSET
+      body: RefreshIndicator(
+        color: YomuColors.primary,
+        backgroundColor: YomuColors.surfaceContainerHigh,
+        edgeOffset: 90.0, // Spinge la rotella sotto l'header trasparente scuro!
+        onRefresh: _refreshMangaDetails,
+        child: CustomScrollView(
+          physics:
+              const AlwaysScrollableScrollPhysics(), // Per poter tirare sempre giù
+          slivers: [
+            _buildHeader(),
+            _buildChapterSectionHeader(),
+            if (_isLoadingChapters)
+              SliverToBoxAdapter(
+                child: Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(32),
+                    child: CircularProgressIndicator(color: YomuColors.primary),
+                  ),
+                ),
+              )
+            else if (_uniqueChapters.isEmpty)
+              SliverToBoxAdapter(
                 child: Padding(
-                  padding: EdgeInsets.all(32),
-                  child: CircularProgressIndicator(color: YomuColors.primary),
+                  padding: EdgeInsets.all(16),
+                  child: Text(
+                    loc.translate('detail_no_chapters'),
+                    style: TextStyle(color: YomuColors.onSurfaceVariant),
+                  ),
+                ),
+              )
+            else
+              SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (_, i) => _buildChapterTile(i),
+                  childCount: _uniqueChapters.length,
                 ),
               ),
-            )
-          else if (_uniqueChapters.isEmpty)
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'Nessun capitolo trovato.',
-                  style: TextStyle(color: YomuColors.onSurfaceVariant),
-                ),
-              ),
-            )
-          else
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (_, i) => _buildChapterTile(i),
-                childCount:
-                    _uniqueChapters.length +
-                    (_isLoadingMoreChapters || _hasMoreChapters ? 1 : 0),
-              ),
-            ),
-
-          const SliverToBoxAdapter(child: SizedBox(height: 40)),
-        ],
+            SliverToBoxAdapter(child: SizedBox(height: 40)),
+          ],
+        ),
       ),
     );
   }
 }
 
-// NUOVO WIDGET PER VISUALIZZARE L'IMMAGINE A SCHERMO INTERO
 class FullScreenImageViewer extends StatelessWidget {
   final String imageUrl;
   final Object heroTag;
@@ -1690,36 +1913,32 @@ class FullScreenImageViewer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black, // Sfondo nero immersivo
+      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.transparent, // App bar trasparente
+        backgroundColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(
-            Icons.close_rounded,
-            color: Colors.white,
-          ), // Pulsante di chiusura
+          icon: Icon(Icons.close_rounded, color: Colors.white),
           onPressed: () => Navigator.pop(context),
         ),
       ),
-      extendBodyBehindAppBar: true, // Lay out dietro l'app bar
-      body: Center(
-        child: InteractiveViewer(
-          // Permette di zoomare l'immagine
-          panEnabled: true,
-          minScale: 0.5,
-          maxScale: 4.0,
+      extendBodyBehindAppBar: true,
+      body: InteractiveViewer(
+        panEnabled: true,
+        minScale: 1.0,
+        maxScale: 4.0,
+        child: SizedBox(
+          width: double.infinity,
+          height: double.infinity,
           child: Hero(
-            tag: heroTag, // Il tag deve coincidere per l'animazione
+            tag: heroTag,
             child: Image.network(
               imageUrl,
-              fit: BoxFit
-                  .contain, // Mostra l'intera immagine, adattandola allo schermo
+              fit: BoxFit.contain,
               loadingBuilder: (context, child, loadingProgress) {
                 if (loadingProgress == null) return child;
-                return const Center(
-                  child:
-                      CircularProgressIndicator(), // Mostra un loader mentre carica l'originale
+                return Center(
+                  child: CircularProgressIndicator(color: Colors.white),
                 );
               },
             ),

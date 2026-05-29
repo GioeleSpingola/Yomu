@@ -2,11 +2,22 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'manga_detail_screen.dart';
 import '../yomu_colors.dart';
+import 'ai_chat_screen.dart';
+import '../Lingue/app_localizations.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final String? initialTagId;
+  final String? initialTagName;
+
+  const HomeScreen({
+    super.key,
+    this.initialTagId,
+    this.initialTagName,
+  });
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -15,6 +26,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<dynamic> _mangaList = [];
   bool _isLoading = true;
   bool _isLoadingMore = false;
+  bool _hasMoreManga = true;
   int _offset = 0;
   final int _limit = 20;
   final ScrollController _scrollController = ScrollController();
@@ -31,19 +43,28 @@ class _HomeScreenState extends State<HomeScreen> {
   Set<String> _selectedDemographics = {};
   String _selectedSort = 'followedCount';
 
-  final Map<String, String> _sortOptions = {
-    'I più popolari': 'followedCount',
-    'I più votati': 'rating',
-    'Le ultime uscite': 'latestUploadedChapter',
-    'Ordine alfabetico': 'title',
+  String _displayMode = 'compact';
+  int _gridColumns = 3;
+  bool _autoGrid = true;
+
+  // 👇 Variabili per il risparmio dati aggiunte
+  String _imageQuality = 'Alta';
+  bool _dataSaver = false;
+
+  final Map<String, String> _sortKeys = {
+    'explore_sort_popular': 'followedCount',
+    'explore_sort_rating': 'rating',
+    'explore_sort_latest': 'latestUploadedChapter',
+    'explore_sort_alpha': 'title',
   };
 
-  final Map<String, String> _statusOptions = {
-    'In corso': 'ongoing',
-    'Completato': 'completed',
-    'Pausa': 'hiatus',
-    'Cancellato': 'cancelled',
+  final Map<String, String> _statusKeys = {
+    'explore_status_ongoing': 'ongoing',
+    'explore_status_completed': 'completed',
+    'explore_status_hiatus': 'hiatus',
+    'explore_status_cancelled': 'cancelled',
   };
+
   final Map<String, String> _demographicOptions = {
     'Shounen': 'shounen',
     'Shoujo': 'shoujo',
@@ -54,13 +75,20 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _fetchTags();
+    _loadDisplaySettings();
+    _fetchTags().then((_) {
+      if (widget.initialTagId != null) {
+        setState(() => _selectedTags.add(widget.initialTagId!));
+        _applyFilters();
+      }
+    });
     _fetchManga();
     _initLibraryListener();
     _scrollController.addListener(() {
       if (_scrollController.position.pixels >=
               _scrollController.position.maxScrollExtent - 500 &&
-          !_isLoadingMore) {
+          !_isLoadingMore &&
+          _hasMoreManga) {
         _fetchMoreManga();
       }
     });
@@ -76,9 +104,33 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  Future<void> _loadDisplaySettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _displayMode = prefs.getString('displayMode') ?? 'compact';
+        _gridColumns = prefs.getInt('gridColumns') ?? 3;
+        _autoGrid = prefs.getBool('autoGrid') ?? true;
+        // 👇 Carichiamo le impostazioni di qualità
+        _imageQuality = prefs.getString('imageQuality') ?? 'Alta';
+        _dataSaver = prefs.getBool('dataSaver') ?? false;
+      });
+    }
+  }
+
+  Future<void> _saveDisplaySettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('displayMode', _displayMode);
+    await prefs.setInt('gridColumns', _gridColumns);
+    await prefs.setBool('autoGrid', _autoGrid);
+  }
+
   Future<void> _fetchTags() async {
     try {
-      final r = await http.get(Uri.parse('https://api.mangadex.org/manga/tag'));
+      // 🌟 FIX: Rimosso corsproxy.io, ora l'app parla direttamente col server!
+      final r = await http.get(
+        Uri.parse('https://api.mangadex.org/manga/tag'),
+      );
       if (r.statusCode == 200) {
         final data = json.decode(r.body);
         if (mounted) {
@@ -95,7 +147,6 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (_) {}
   }
-
   void _initLibraryListener() {
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) {
@@ -142,44 +193,63 @@ class _HomeScreenState extends State<HomeScreen> {
         .map((d) => '&publicationDemographic[]=$d')
         .join();
 
+    // 🌟 FIX: Rimosso corsproxy.io dall'URL base!
     return 'https://api.mangadex.org/manga?includes[]=cover_art'
         '&limit=$_limit&offset=$_offset'
         '&hasAvailableChapters=true'
-        '&contentRating[]=safe' // RIMOSSO 'suggestive' per sicurezza
-        '&order[$_selectedSort]=desc' // AGGIUNTO ORDINAMENTO
+        '&contentRating[]=safe'
+        '&order[$_selectedSort]=desc'
         '$search$tags$status$demog';
   }
 
   Future<void> _fetchManga() async {
     if (!mounted) return;
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _hasMoreManga = true;
+    });
     try {
-      final r = await http.get(Uri.parse(_buildUrl()));
+      // 🌟 AGGIUNTA FONDAMENTALE: Gli Headers
+      final r = await http.get(
+        Uri.parse(_buildUrl()),
+        headers: {
+          'User-Agent': 'YomuApp/1.0 (https://github.com/tuo-profilo-github)'
+        },
+      );
+      
       if (r.statusCode == 200) {
         final data = json.decode(r.body);
+        final items = data['data'] as List;
         if (mounted) {
           setState(() {
-            _mangaList.addAll(data['data']);
+            _mangaList.addAll(items);
+            _hasMoreManga = items.length == _limit;
             _isLoading = false;
           });
         }
+      } else {
+        print("💥 ERRORE API: Server MangaDex ha risposto con ${r.statusCode}");
+        if (mounted) setState(() => _isLoading = false);
       }
-    } catch (_) {
+    } catch (e) {
       if (mounted) setState(() => _isLoading = false);
+      print("💥 ERRORE DI CONNESSIONE: $e");
     }
   }
 
   Future<void> _fetchMoreManga() async {
-    if (_isLoadingMore) return;
+    if (_isLoadingMore || !_hasMoreManga) return;
     setState(() => _isLoadingMore = true);
     _offset += _limit;
     try {
       final r = await http.get(Uri.parse(_buildUrl()));
       if (r.statusCode == 200) {
         final data = json.decode(r.body);
+        final items = data['data'] as List;
         if (mounted) {
           setState(() {
-            _mangaList.addAll(data['data']);
+            _mangaList.addAll(items);
+            _hasMoreManga = items.length == _limit;
             _isLoadingMore = false;
           });
         }
@@ -211,7 +281,16 @@ class _HomeScreenState extends State<HomeScreen> {
     for (var rel in (manga['relationships'] as List? ?? [])) {
       if (rel['type'] == 'cover_art') {
         final fn = rel['attributes']?['fileName'] ?? '';
-        if (fn.isNotEmpty) return 'https://uploads.mangadex.org/covers/$id/$fn';
+        if (fn.isNotEmpty) {
+          // 👇 LA MAGIA DEL RISPARMIO DATI 👇
+          String suffix = '';
+          if (_dataSaver || _imageQuality == 'Bassa') {
+            suffix = '.256.jpg'; // Super compresso, carica in un millisecondo
+          } else if (_imageQuality == 'Media') {
+            suffix = '.512.jpg'; // Qualità bilanciata
+          }
+          return 'https://uploads.mangadex.org/covers/$id/$fn$suffix';
+        }
       }
     }
     return '';
@@ -233,7 +312,233 @@ class _HomeScreenState extends State<HomeScreen> {
       _selectedStatus.length +
       _selectedDemographics.length;
 
+  void _showDisplaySettingsSheet() {
+    final loc = AppLocalizations.of(context)!;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: YomuColors.surfaceContainerHigh,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setModal) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    color: YomuColors.outlineVariant,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Text(
+                loc.translate('display_title'),
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: YomuColors.onSurface,
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              Text(
+                loc.translate('display_mode'),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: YomuColors.primary,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _displayModeChip(
+                    setModal,
+                    'compact',
+                    loc.translate('display_grid_compact'),
+                    Icons.grid_view_rounded,
+                  ),
+                  _displayModeChip(
+                    setModal,
+                    'comfortable',
+                    loc.translate('display_grid_comfortable'),
+                    Icons.grid_on_rounded,
+                  ),
+                  _displayModeChip(
+                    setModal,
+                    'list',
+                    loc.translate('display_list'),
+                    Icons.view_list_rounded,
+                  ),
+                ],
+              ),
+
+              if (_displayMode != 'list') ...[
+                const SizedBox(height: 24),
+                Divider(
+                  color: YomuColors.outlineVariant.withOpacity(0.3),
+                  height: 1,
+                ),
+                const SizedBox(height: 16),
+
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      loc.translate('display_columns'),
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: YomuColors.primary,
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        Text(
+                          loc.translate('display_auto'),
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: YomuColors.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Switch(
+                          value: _autoGrid,
+                          activeColor: YomuColors.primary,
+                          onChanged: (v) {
+                            setState(() => _autoGrid = v);
+                            setModal(() => _autoGrid = v);
+                            _saveDisplaySettings();
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+
+                Opacity(
+                  opacity: _autoGrid ? 0.4 : 1.0,
+                  child: IgnorePointer(
+                    ignoring: _autoGrid,
+                    child: Column(
+                      children: [
+                        SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            activeTrackColor: YomuColors.primary,
+                            inactiveTrackColor: YomuColors.outlineVariant
+                                .withOpacity(0.5),
+                            thumbColor: YomuColors.primary,
+                            valueIndicatorColor: YomuColors.primary,
+                            trackHeight: 4,
+                          ),
+                          child: Slider(
+                            value: _gridColumns.toDouble(),
+                            min: 2,
+                            max: 6,
+                            divisions: 4,
+                            label: _gridColumns.toString(),
+                            onChanged: (v) {
+                              setState(() => _gridColumns = v.toInt());
+                              setModal(() => _gridColumns = v.toInt());
+                              _saveDisplaySettings();
+                            },
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '2',
+                                style: TextStyle(
+                                  color: YomuColors.onSurfaceVariant,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              Text(
+                                '6',
+                                style: TextStyle(
+                                  color: YomuColors.onSurfaceVariant,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _displayModeChip(
+    StateSetter setModal,
+    String mode,
+    String label,
+    IconData icon,
+  ) {
+    final isSel = _displayMode == mode;
+    return GestureDetector(
+      onTap: () {
+        setState(() => _displayMode = mode);
+        setModal(() => _displayMode = mode);
+        _saveDisplaySettings();
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSel ? YomuColors.primary : YomuColors.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isSel
+                ? YomuColors.primary
+                : YomuColors.outlineVariant.withOpacity(0.4),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: isSel ? YomuColors.onPrimary : YomuColors.onSurfaceVariant,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: isSel
+                    ? YomuColors.onPrimary
+                    : YomuColors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showFilterSheet() {
+    final loc = AppLocalizations.of(context)!;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -266,10 +571,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 20),
                       child: Row(
                         children: [
-                          const Text(
-                            'Filtri',
+                          Text(
+                            loc.translate('explore_filters'),
                             style: TextStyle(
-                              fontFamily: 'Manrope',
                               fontWeight: FontWeight.w800,
                               fontSize: 20,
                               color: YomuColors.onSurface,
@@ -287,7 +591,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 borderRadius: BorderRadius.circular(999),
                               ),
                               child: Text(
-                                '$_activeFilterCount attivi',
+                                '$_activeFilterCount ${loc.translate('explore_active')}',
                                 style: TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w700,
@@ -312,8 +616,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                 color: YomuColors.error.withOpacity(0.1),
                                 borderRadius: BorderRadius.circular(8),
                               ),
-                              child: const Text(
-                                'Resetta',
+                              child: Text(
+                                loc.translate('common_reset'),
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
@@ -338,14 +642,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   controller: sc,
                   padding: const EdgeInsets.all(20),
                   children: [
-                    // --- INIZIO NUOVA SEZIONE: ORDINAMENTO ---
                     _filterSection(
-                      label: 'Ordina per',
+                      label: loc.translate('explore_sort_by'),
                       icon: Icons.sort_rounded,
                       child: Wrap(
                         spacing: 8,
                         runSpacing: 8,
-                        children: _sortOptions.entries.map((e) {
+                        children: _sortKeys.entries.map((e) {
                           final isSel = _selectedSort == e.value;
                           return GestureDetector(
                             onTap: () =>
@@ -370,7 +673,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                               ),
                               child: Text(
-                                e.key,
+                                loc.translate(e.key),
                                 style: TextStyle(
                                   fontSize: 13,
                                   fontWeight: FontWeight.w600,
@@ -386,7 +689,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 22),
                     _filterSection(
-                      label: 'Target',
+                      label: loc.translate('explore_demographic'),
                       icon: Icons.people_rounded,
                       child: _segmentedOptions(
                         options: _demographicOptions,
@@ -400,7 +703,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 22),
                     _filterSection(
-                      label: 'Generi e temi',
+                      label: loc.translate('explore_genres'),
                       icon: Icons.label_rounded,
                       child: _availableTags.isEmpty
                           ? Center(
@@ -451,7 +754,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
                       ),
-                      textStyle: const TextStyle(
+                      textStyle: TextStyle(
                         fontWeight: FontWeight.w700,
                         fontSize: 15,
                       ),
@@ -463,7 +766,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Text('Applica filtri'),
+                        Text(loc.translate('explore_apply_filters')),
                         if (_hasActiveFilters) ...[
                           const SizedBox(width: 8),
                           Container(
@@ -477,7 +780,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                             child: Text(
                               '$_activeFilterCount',
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w800,
                                 color: YomuColors.onPrimary,
@@ -614,6 +917,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildSearchBar() {
+    final loc = AppLocalizations.of(context)!;
     return Container(
       height: 52,
       decoration: BoxDecoration(
@@ -623,14 +927,14 @@ class _HomeScreenState extends State<HomeScreen> {
       child: TextField(
         controller: _searchCtrl,
         textInputAction: TextInputAction.search,
-        style: const TextStyle(color: YomuColors.onSurface, fontSize: 14),
+        style: TextStyle(color: YomuColors.onSurface, fontSize: 14),
         decoration: InputDecoration(
-          hintText: 'Cerca manga, autori o generi…',
-          hintStyle: const TextStyle(
+          hintText: loc.translate('explore_search_hint'),
+          hintStyle: TextStyle(
             color: YomuColors.onSurfaceVariant,
             fontSize: 14,
           ),
-          prefixIcon: const Icon(
+          prefixIcon: Icon(
             Icons.search_rounded,
             color: YomuColors.onSurfaceVariant,
           ),
@@ -639,7 +943,7 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               if (_searchQuery.isNotEmpty)
                 IconButton(
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.close_rounded,
                     color: YomuColors.onSurfaceVariant,
                     size: 20,
@@ -649,6 +953,20 @@ class _HomeScreenState extends State<HomeScreen> {
                     _performSearch('');
                   },
                 ),
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: _showDisplaySettingsSheet,
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    child: Icon(
+                      Icons.display_settings_rounded,
+                      color: YomuColors.onSurfaceVariant,
+                      size: 22,
+                    ),
+                  ),
+                ),
+              ),
               Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: GestureDetector(
@@ -712,6 +1030,192 @@ class _HomeScreenState extends State<HomeScreen> {
     final url = _coverUrl(manga);
     final name = _title(manga);
 
+    Widget cardContent;
+
+    if (_displayMode == 'list') {
+      cardContent = Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(
+              width: 60,
+              height: 85,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  url.isNotEmpty
+                      ? CachedNetworkImage(
+  imageUrl: url, // ⚠️ Usa 'coverUrl' se sei nel file library_screen.dart
+  fit: BoxFit.cover,
+  fadeInDuration: const Duration(milliseconds: 200),
+  placeholder: (context, url) => Container(color: YomuColors.surfaceContainerHigh),
+  errorWidget: (context, url, error) => Container(color: YomuColors.surfaceContainerHigh),
+)
+                      : Container(color: YomuColors.surfaceContainerHigh),
+                  if (isSaved)
+                    Positioned(
+                      top: 4,
+                      left: 4,
+                      child: Icon(
+                        Icons.bookmark_rounded,
+                        color: Colors.amber,
+                        size: 14,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 4),
+                Text(
+                  name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: YomuColors.onSurface,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    } else if (_displayMode == 'comfortable') {
+      cardContent = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  url.isNotEmpty
+                      ? CachedNetworkImage(
+  imageUrl: url, // ⚠️ Usa 'coverUrl' se sei nel file library_screen.dart
+  fit: BoxFit.cover,
+  fadeInDuration: const Duration(milliseconds: 200),
+  placeholder: (context, url) => Container(color: YomuColors.surfaceContainerHigh),
+  errorWidget: (context, url, error) => Container(color: YomuColors.surfaceContainerHigh),
+)
+                      : Container(color: YomuColors.surfaceContainerHigh),
+                  if (isSaved)
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: YomuColors.primary.withOpacity(0.85),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Icon(
+                          Icons.bookmark_rounded,
+                          color: Colors.amber,
+                          size: 12,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 32,
+            child: Text(
+              name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: YomuColors.onSurface,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ],
+      );
+    } else {
+      cardContent = ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            url.isNotEmpty
+                ? CachedNetworkImage(
+  imageUrl: url, // ⚠️ Usa 'coverUrl' se sei nel file library_screen.dart
+  fit: BoxFit.cover,
+  fadeInDuration: const Duration(milliseconds: 200),
+  placeholder: (context, url) => Container(color: YomuColors.surfaceContainerHigh),
+  errorWidget: (context, url, error) => Container(color: YomuColors.surfaceContainerHigh),
+)
+                : Container(color: YomuColors.surfaceContainerHigh),
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.transparent, Colors.black.withOpacity(0.8)],
+                    stops: const [0.5, 1.0],
+                  ),
+                ),
+              ),
+            ),
+            if (isSaved)
+              Positioned(
+                top: 8,
+                left: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: YomuColors.primary.withOpacity(0.85),
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(8),
+                      bottomRight: Radius.circular(8),
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.bookmark_rounded,
+                    color: Colors.amber,
+                    size: 13,
+                  ),
+                ),
+              ),
+            Positioned(
+              left: 8,
+              right: 8,
+              bottom: 8,
+              child: Text(
+                name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return GestureDetector(
       onTap: () =>
           Navigator.push(
@@ -724,94 +1228,12 @@ class _HomeScreenState extends State<HomeScreen> {
             _loadInitialLibrary();
             setState(() {});
           }),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  url.isNotEmpty
-                      ? Image.network(
-                          url,
-                          fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) => Container(
-                            color: YomuColors.surfaceContainerHigh,
-                            child: const Icon(
-                              Icons.broken_image_rounded,
-                              color: YomuColors.outline,
-                            ),
-                          ),
-                        )
-                      : Container(
-                          color: YomuColors.surfaceContainerHigh,
-                          child: const Icon(
-                            Icons.image_not_supported_rounded,
-                            color: YomuColors.outline,
-                          ),
-                        ),
-                  Positioned.fill(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Colors.transparent,
-                            Colors.black.withOpacity(0.6),
-                          ],
-                          stops: const [0.5, 1.0],
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (isSaved)
-                    Positioned(
-                      top: 8,
-                      left: 8,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: YomuColors.primary.withOpacity(0.85),
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(8),
-                            bottomRight: Radius.circular(8),
-                          ),
-                        ),
-                        child: const Icon(
-                          Icons.bookmark_rounded,
-                          color: Colors.amber,
-                          size: 13,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 7),
-          Text(
-            name,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: YomuColors.onSurface,
-              height: 1.3,
-            ),
-          ),
-        ],
-      ),
+      child: cardContent,
     );
   }
 
   Widget _buildBody() {
+    final loc = AppLocalizations.of(context)!;
     if (_isLoading && _mangaList.isEmpty) {
       return SliverFillRemaining(
         child: Center(
@@ -820,37 +1242,51 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
     if (_mangaList.isEmpty) {
-      return const SliverFillRemaining(
+      return SliverFillRemaining(
         child: Center(
           child: Text(
-            'Nessun manga trovato.',
+            loc.translate('explore_not_found'),
             style: TextStyle(color: YomuColors.onSurfaceVariant, fontSize: 15),
           ),
         ),
       );
     }
+
+    if (_displayMode == 'list') {
+      return SliverPadding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        sliver: SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (_, i) => Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: _buildBrowseCard(_mangaList[i]),
+            ),
+            childCount: _mangaList.length,
+          ),
+        ),
+      );
+    }
+
+    int actualColumns = _autoGrid
+        ? (MediaQuery.of(context).size.width ~/ 110).clamp(2, 6)
+        : _gridColumns;
+
+    double ratio = _displayMode == 'comfortable' ? 0.52 : 0.65;
+
+    if (actualColumns == 2) ratio += 0.15;
+    if (actualColumns >= 4) ratio -= (0.05 * (actualColumns - 3));
+
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 80),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       sliver: SliverGrid(
         delegate: SliverChildBuilderDelegate((_, i) {
-          if (i >= _mangaList.length) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: CircularProgressIndicator(
-                  color: YomuColors.primary,
-                  strokeWidth: 2,
-                ),
-              ),
-            );
-          }
           return _buildBrowseCard(_mangaList[i]);
-        }, childCount: _mangaList.length + (_isLoadingMore ? 2 : 0)),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          childAspectRatio: 0.58,
+        }, childCount: _mangaList.length),
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: actualColumns,
+          childAspectRatio: ratio,
           crossAxisSpacing: 10,
-          mainAxisSpacing: 18,
+          mainAxisSpacing: _displayMode == 'comfortable' ? 18 : 10,
         ),
       ),
     );
@@ -858,17 +1294,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final loc = AppLocalizations.of(context)!;
     return Scaffold(
       backgroundColor: YomuColors.surface,
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAiChatModal,
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const AiChatScreen()),
+          );
+        },
         backgroundColor: YomuColors.primary,
-        foregroundColor: YomuColors
-            .onPrimary, // L'icona e il testo saranno neri/viola scuro sul bottone chiaro
+        foregroundColor: YomuColors.onPrimary,
         elevation: 4,
-        icon: const Icon(Icons.auto_awesome_rounded),
-        label: const Text(
-          'Consigli AI',
+        icon: Icon(Icons.auto_awesome_rounded),
+        label: Text(
+          loc.translate('chat_ai_recs'),
           style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.2),
         ),
       ),
@@ -901,11 +1342,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
                   children: [
                     ..._selectedStatus.map((v) {
-                      final label = _statusOptions.entries
+                      final key = _statusKeys.entries
                           .firstWhere((e) => e.value == v)
                           .key;
                       return _activePill(
-                        label,
+                        loc.translate(key),
                         onRemove: () => setState(() {
                           _selectedStatus.remove(v);
                           _applyFilters();
@@ -929,7 +1370,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         (t) => t['id'] == id,
                         orElse: () => null,
                       );
-                      final name = tag?['attributes']?['name']?['en'] ?? id;
+                      
+                      String name = tag?['attributes']?['name']?['en'] ?? id;
+                      if (tag == null && id == widget.initialTagId && widget.initialTagName != null) {
+                        name = widget.initialTagName!;
+                      }
+                      
                       return _activePill(
                         name,
                         onRemove: () => setState(() {
@@ -943,7 +1389,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         padding: const EdgeInsets.only(left: 4),
                         child: Center(
                           child: Text(
-                            '+${_selectedTags.length - 3} generi',
+                            '+${_selectedTags.length - 3} ${loc.translate('explore_more_genres')}',
                             style: TextStyle(
                               fontSize: 11,
                               color: YomuColors.primary,
@@ -962,11 +1408,12 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Row(
                 children: [
                   Text(
-                    _sortOptions.entries
-                        .firstWhere((e) => e.value == _selectedSort)
-                        .key,
-                    style: const TextStyle(
-                      fontFamily: 'Manrope',
+                    loc.translate(
+                      _sortKeys.entries
+                          .firstWhere((e) => e.value == _selectedSort)
+                          .key,
+                    ),
+                    style: TextStyle(
                       fontWeight: FontWeight.w800,
                       fontSize: 22,
                       color: YomuColors.onSurface,
@@ -976,7 +1423,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   const Spacer(),
                   if (_hasActiveFilters)
                     Text(
-                      'Filtrati',
+                      loc.translate('explore_filtered'),
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -988,107 +1435,21 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           _buildBody(),
-        ],
-      ),
-    );
-  }
-
-  // ─── AI Chatbot Mockup ───────────────────────────────────────────────────
-  void _showAiChatModal() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: YomuColors.surfaceContainer,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: Container(
-          height: MediaQuery.of(ctx).size.height * 0.55,
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            children: [
-              // Trattino in alto
-              Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: YomuColors.outlineVariant,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 24),
-              // Icona AI Scintillante
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: YomuColors.primary.withOpacity(0.15),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.auto_awesome_rounded,
-                  size: 36,
-                  color: YomuColors.primary,
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Yomu AI',
-                style: TextStyle(
-                  fontFamily: 'Manrope',
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                  color: YomuColors.onSurface,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Analizzo la tua libreria e i tuoi progressi per consigliarti la tua prossima ossessione. Cosa ti va di leggere oggi?',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: YomuColors.onSurfaceVariant,
-                  height: 1.4,
-                ),
-              ),
-              const Spacer(),
-              // Finta barra di chat per il mockup
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                decoration: BoxDecoration(
-                  color: YomuColors.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(
-                    color: YomuColors.outlineVariant.withOpacity(0.5),
+          if (_isLoadingMore)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 80, top: 16),
+                child: Center(
+                  child: CircularProgressIndicator(
+                    color: YomuColors.primary,
+                    strokeWidth: 2,
                   ),
                 ),
-                child: Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Chiedi a Yomu AI...',
-                        style: TextStyle(
-                          color: YomuColors.onSurfaceVariant,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ),
-                    Icon(
-                      Icons.send_rounded,
-                      color: YomuColors.primary,
-                      size: 20,
-                    ),
-                  ],
-                ),
               ),
-              const SizedBox(height: 12),
-            ],
-          ),
-        ),
+            )
+          else
+            const SliverToBoxAdapter(child: SizedBox(height: 80)),
+        ],
       ),
     );
   }

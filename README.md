@@ -94,16 +94,17 @@ Inserire il diagramma qui:
 | **P5** | Gestione Progressi | Traccia e salva automaticamente i capitoli e le pagine lette dall'utente loggato, recuperando la cronologia al rientro. |
 | **P6** | Personalizzazione Impostazioni | Gestisce le preferenze utente (es. direzione di lettura, tema cromatico, sfondo) salvandole nella memoria locale del dispositivo. |
 | **P7** | Chatbot Raccomandazioni | *(Opzionale)* Interroga un'API di Intelligenza Artificiale per suggerire letture basate sulla libreria e i progressi dell'utente. |
+| **P8** | Deep Linking e Condivisione | Intercetta link esterni (URI `yomu://` o `mangadex.org`), analizza i parametri e instrada l'utente direttamente alla risorsa richiesta. |
 
 ### Flusso tra Processi e Archivi Dati
 
-L'architettura del sistema prevede flussi differenziati in base ai permessi dell'utente. 
+L'architettura del sistema prevede flussi differenziati in base ai permessi dell'utente e si è evoluta per integrare funzionalità hardware e cloud. 
 
-L'Utente Non Loggato può interagire con il sistema interrogando P2 per esplorare il catalogo o P3 per leggere capitoli, processi che fungono da ponte diretto e bidirezionale con l'API Esterna. Per sbloccare le funzionalità complete, l'utente interagisce con P1, che legge e scrive i dati nel database degli utenti (DB1), validando la sessione e abilitando i permessi di Utente Loggato.
+L'Utente Non Loggato può interagire con il sistema interrogando P2 per esplorare il catalogo o P3 per leggere i capitoli; questi processi fungono da ponte diretto e bidirezionale con l'API Esterna (MangaDex), con P3 che ora analizza dinamicamente i metadati per forzare adattamenti UI (es. Webtoon). Inoltre, l'utente può accedere tramite P8 (Deep Linking), un processo che intercetta i link a livello di Sistema Operativo e instrada la navigazione aggirando i flussi standard. Per sbloccare le funzionalità complete, l'utente interagisce con P1, che non solo legge e scrive nel database degli utenti (DB1) per validare la sessione, ma comunica anche con l'hardware del dispositivo per l'autenticazione biometrica.
 
-Una volta loggato, i flussi di lettura si ramificano: le azioni dell'utente passano per P4 e P5, i quali comunicano in modo bidirezionale con i rispettivi archivi (Libreria, DB2 e Progressi, DB3) per salvare lo stato delle opere e aggiornare in tempo reale la cronologia. 
-Parallelamente, qualsiasi utente può interagire con P6 per modificare le preferenze di interfaccia, i cui dati vengono scritti e letti direttamente dalla memoria cache del dispositivo (DB4: Local Storage), garantendo un'esperienza fluida senza gravare sul database principale. 
-Infine, le richieste di consigli di lettura vengono elaborate da P7, che funge da intermediario verso un'API di AI Esterna.
+Una volta loggato, i flussi di navigazione profonda si ramificano: le azioni dell'utente passano per P4 e P5, i quali comunicano in modo bidirezionale con i rispettivi archivi (Libreria, DB2 e Progressi, DB3) per salvare lo stato delle opere in tempo reale. Il processo P5 ora gestisce un flusso parallelo in modalità "upsert" verso un nuovo archivio (Statistiche Giornaliere, DB5) per monitorare i minuti di lettura. 
+Parallelamente, qualsiasi utente può interagire con P6 per modificare le preferenze di interfaccia. Questo processo ora è ibrido: legge e scrive dalla memoria cache del dispositivo per garantire fluidità offline, ma sincronizza i dati in background con l'archivio remoto (DB4: Cloud Settings), garantendo la continuità multi-dispositivo. 
+Infine, le richieste conversazionali vengono elaborate da P7, che estrapola il contesto della pagina corrente (titolo e metadati) e funge da intermediario verso l'API di AI Esterna per fornire raccomandazioni mirate.
 
 ---
 
@@ -121,6 +122,10 @@ I requisiti funzionali descrivono ciò che il sistema deve fare.
 | RF-04 |	Salvataggio Progressi: Il sistema deve salvare in automatico nel DB l'esatto punto di lettura (Capitolo e Pagina). |	Alta |
 | RF-05 |	Ricerca e Filtri: Il sistema deve permettere di cercare manga per titolo e filtrare la propria libreria. |	Media |
 | RF-06 |	Chatbot Raccomandazioni: Il sistema deve includere un modulo chat per consigliare titoli.	| Bassa |
+| RF-07 | Sblocco Biometrico: Il sistema deve permettere di blindare l'accesso ai dati richiedendo Impronta o Face ID all'avvio. | Media |
+| RF-08 | Condivisione e Deep Linking: Il sistema deve generare link di condivisione e intercettarli a livello OS per aprire i dettagli dell'opera. | Alta |
+| RF-09 | Auto-Detect Formato Lettura: Il sistema deve riconoscere i Webtoon/Long Strip dai metadati e adattare forzatamente lo scroll della pagina. | Media |
+| RF-10 | Chatbot Contestuale: L'assistente AI deve recepire come parametro d'ingresso il manga correntemente visualizzato dall'utente. | Bassa |
 
 ---
 
@@ -139,6 +144,10 @@ I requisiti non funzionali definiscono attributi di qualità.
 ### Usabilità
 - Mobile First: UI progettata esplicitamente per schermi touch, con controlli intuitivi per il reader (tap ai lati per scorrere, pinch to zoom).
 - Responsive design: Adattabilità nel caso in cui venga sviluppata l'interfaccia Web.  
+
+### Integrazione Hardware e OS
+- **Intercettazione Intent:** L'app deve essere registrata nel manifest di Android come gestore primario per domini specifici e custom schemes.
+- **API Biometriche:** Utilizzo delle librerie native di sicurezza per garantire che le chiavi di sblocco non lascino mai il Secure Enclave del dispositivo.
 
 ---
 
@@ -170,16 +179,21 @@ Il database di Yomu è progettato per essere snello, poiché gran parte dei dati
 
 | Entità | Descrizione |
 |--------|------------|
-| UTENTE |	Contiene i dati di autenticazione e anagrafica base. |
-| LIBRERIA |	Entità ponte che traccia quali manga l'utente ha salvato tra i preferiti o sta leggendo. |
-| PROGRESSO |	Traccia l'esatta posizione di lettura (Ultimo capitolo e pagina letta) per un determinato manga. |
+| UTENTE | Contiene i dati di autenticazione e anagrafica base. |
+| LIBRERIA | Entità ponte che traccia quali manga l'utente ha salvato o sta leggendo. |
+| PROGRESSO | Traccia l'esatta posizione di lettura (Capitolo e Pagina) per un manga. |
+| IMPOSTAZIONI_UTENTE | Memorizza in cloud le preferenze applicative per garantire la continuità tra dispositivi diversi. |
+| STATISTICHE_GIORNALIERE | Tabella analitica che traccia la data e i minuti trascorsi in lettura per generare report grafici. |
+
 
 ## 6.2 Relazioni
 
 | Relazione | Entità Coinvolte | Cardinalità |
 |-----------|-----------------|-------------|
-| Salva in	| UTENTE - LIBRERIA |	1 : N |	Un utente può avere molti manga nella sua libreria. |
-| Genera	| UTENTE - PROGRESSO |	1 : N	| L'utente genera diversi record di progresso (uno per manga). |
+| Salva in | UTENTE - LIBRERIA | 1 : N | Un utente ha molti manga nella libreria. |
+| Genera | UTENTE - PROGRESSO | 1 : N | L'utente genera diversi record di progresso. |
+| Configura | UTENTE - IMPOSTAZIONI_UTENTE | 1 : 1 | Ogni utente possiede un set univoco di preferenze sincronizzate. |
+| Produce | UTENTE - STATISTICHE_GIORNALIERE - STATISTICHE_LETTURA | 1 : N | Un utente genera un record di statistiche per ogni giorno di utilizzo. Inoltre aumenta i minuti di lettura |
 
 Inserire il diagramma E/R qui.
 <img width="630" height="531" alt="Schema_E_R_Yomu" src="https://github.com/user-attachments/assets/c857659b-24a4-4d47-9259-b17a61f45148" />
@@ -195,15 +209,16 @@ Inserire il diagramma E/R qui.
 
 | Pagina | Descrizione | Livello di Accesso |
 |--------|------------|-------------------|
-| **Splash Screen** | Schermata di avvio con logo e smistamento automatico basato sulla sessione utente attiva. | Tutti |
+| **Splash Screen** | Schermata di avvio che funge da controller per l'autenticazione biometrica prima di autorizzare l'accesso. | Tutti |
 | **Auth Screen** | Interfaccia di Login e Registrazione con validazione dei campi in tempo reale. | Utente Non Loggato |
 | **Main Screen** | Contenitore principale ("Scaffold") che ospita la barra di navigazione inferiore e mantiene lo stato. | Tutti |
 | **Home Screen (Esplora)** | Catalogo interattivo collegato all'API esterna con barra di ricerca e filtri avanzati (BottomSheet). | Tutti |
 | **Library Screen** | Dashboard personale che mostra i manga salvati divisi per stato di lettura (chip dinamici). | Utente Loggato |
 | **History Screen** | Cronologia dinamica che mostra l'esatto capitolo e pagina dell'ultima sessione di lettura. | Utente Loggato |
-| **Manga Detail Screen**| Pagina di dettaglio dell'opera con trama, gestione salvataggi e lista completa dei capitoli. | Tutti |
+| **Manga Detail Screen** | Pagina di dettaglio con supporto al cross-routing per categoria, auto-rilevamento formato e pulsanti di condivisione profonda (Deep Link). | Tutti |
 | **Reader Screen** | Visualizzatore immersivo a schermo intero con zoom, cambio pagina al tocco e slider direzionale. | Tutti |
-| **Settings Screen** | Pannello per la personalizzazione dell'app (colore tema, verso di lettura, svuotamento cache). | Tutti |
+| **Settings Screen** | Pannello avanzato per personalizzare l'app, gestire il backup in cloud delle preferenze e attivare i layer di sicurezza hardware. | Tutti |
+| **Ai Chat Screen** | Modulo conversazionale con riconoscimento del contesto di navigazione e messaggi con testo selezionabile per facilitare l'estrazione di titoli. | Tutti |
 ## 7.2 Componenti Principali
 
 Per costruire l'interfaccia sono stati utilizzati i seguenti componenti nativi e personalizzati:

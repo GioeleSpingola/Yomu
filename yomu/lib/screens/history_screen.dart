@@ -4,6 +4,8 @@ import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'manga_detail_screen.dart';
 import '../yomu_colors.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../Lingue/app_localizations.dart';
 
 class HistoryScreen extends StatefulWidget {
   final int currentTabIndex;
@@ -17,22 +19,42 @@ class _HistoryScreenState extends State<HistoryScreen> {
   List<Map<String, dynamic>> _history = [];
   bool _isLoading = true;
 
+  String _dateFormat = 'dd/MM/yyyy';
+  bool _relativeTimestamps = true;
+
+  // 👇 Variabili per il risparmio dati
+  String _imageQuality = 'Alta';
+  bool _dataSaver = false;
+
   @override
   void initState() {
     super.initState();
+    _loadPrefs();
     _fetchHistory();
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _dateFormat = prefs.getString('dateFormat') ?? 'dd/MM/yyyy';
+        _relativeTimestamps = prefs.getBool('relativeTimestamps') ?? true;
+        // 👇 Caricamento preferenze qualità
+        _imageQuality = prefs.getString('imageQuality') ?? 'Alta';
+        _dataSaver = prefs.getBool('dataSaver') ?? false;
+      });
+    }
   }
 
   @override
   void didUpdateWidget(HistoryScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Se l'utente ha appena cliccato sulla scheda 2 (Cronologia), aggiorniamo i dati in background!
     if (widget.currentTabIndex == 2 && oldWidget.currentTabIndex != 2) {
+      _loadPrefs();
       _fetchHistory();
     }
   }
 
-  // ─── Logic ────────────────────────────────────────────────────────────────
   Future<void> _fetchHistory() async {
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) {
@@ -41,7 +63,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
 
     try {
-      // 1. Prendiamo gli ultimi progressi dell'utente
       final progressData = await Supabase.instance.client
           .from('progressi')
           .select()
@@ -59,7 +80,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         return;
       }
 
-      // 2. Estraiamo i manga UNICI (vogliamo mostrare solo l'ultimo capitolo letto per manga)
       final List<Map<String, dynamic>> uniqueProgress = [];
       final Set<String> seenMangaIds = {};
 
@@ -72,24 +92,20 @@ class _HistoryScreenState extends State<HistoryScreen> {
         }
       }
 
-      // Prendiamo i primi 30 manga recenti
       final topHistory = uniqueProgress.take(30).toList();
       final mangaIds = topHistory.map((e) => e['manga_id'].toString()).toList();
 
-      // Prepariamo anche gli ID dei capitoli
       final chapterIds = topHistory
           .map((e) => e['chapter_id']?.toString() ?? '')
           .where((id) => id.isNotEmpty && id != 'null')
           .toList();
 
-      // 3. Batch Fetch da MangaDex per I MANGA
       final idsQuery = mangaIds.map((id) => 'ids[]=$id').join('&');
       final url = Uri.parse(
         'https://api.mangadex.org/manga?includes[]=cover_art&limit=30&$idsQuery',
       );
       final response = await http.get(url);
 
-      // 4. Batch Fetch da MangaDex per I CAPITOLI (Per avere il numero reale del capitolo!)
       Map<String, String> chapterNumbersMap = {};
       if (chapterIds.isNotEmpty) {
         final chapQuery = chapterIds.map((id) => 'ids[]=$id').join('&');
@@ -100,7 +116,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         if (chapResponse.statusCode == 200) {
           final chapData = json.decode(chapResponse.body)['data'] as List;
           for (var c in chapData) {
-            // Se il chapter è null (es. nei oneshot), mettiamo un '?'
             chapterNumbersMap[c['id']] =
                 c['attributes']['chapter']?.toString() ?? '?';
           }
@@ -124,9 +139,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               'manga': mangaInfo,
               'title': _extractTitle(mangaInfo),
               'coverUrl': _extractCover(mangaInfo),
-              'chapterNum':
-                  chapterNumbersMap[cId] ??
-                  '?', // Aggiungiamo il numero del capitolo!
+              'chapterNum': chapterNumbersMap[cId] ?? '?',
             });
           }
         }
@@ -148,8 +161,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   String _extractTitle(dynamic manga) {
     final attrs = manga['attributes']['title'] as Map;
-    return (attrs['en'] ?? attrs.values.firstOrNull ?? 'Sconosciuto')
-        .toString();
+    final loc = AppLocalizations.of(context);
+    final fallback = loc?.translate('common_unknown') ?? 'Sconosciuto';
+    return (attrs['en'] ?? attrs.values.firstOrNull ?? fallback).toString();
   }
 
   String _extractCover(dynamic manga) {
@@ -159,7 +173,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
       if (rel['type'] == 'cover_art') {
         final fileName = rel['attributes']['fileName'] ?? '';
         if (fileName.isNotEmpty) {
-          return 'https://uploads.mangadex.org/covers/$id/$fileName';
+          // 👇 LA MAGIA DEL RISPARMIO DATI ANCHE QUI 👇
+          String suffix = '';
+          if (_dataSaver || _imageQuality == 'Bassa') {
+            suffix = '.256.jpg';
+          } else if (_imageQuality == 'Media') {
+            suffix = '.512.jpg';
+          }
+          return 'https://uploads.mangadex.org/covers/$id/$fileName$suffix';
         }
       }
     }
@@ -179,23 +200,52 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   String _formatDate(String? iso) {
-    if (iso == null) return '';
+    if (iso == null || iso.isEmpty) return '';
+    final loc = AppLocalizations.of(context)!;
     try {
-      final dt = DateTime.parse(iso).toLocal();
-      final now = DateTime.now();
-      final diff = now.difference(dt);
-      if (diff.inMinutes < 60) return '${diff.inMinutes} min fa';
-      if (diff.inHours < 24) return '${diff.inHours} ore fa';
-      if (diff.inDays == 1) return 'Ieri';
-      if (diff.inDays < 7) return '${diff.inDays} giorni fa';
-      return '${dt.day}/${dt.month}/${dt.year}';
+      String fixedIso = iso;
+      if (!fixedIso.endsWith('Z') && !fixedIso.contains('+')) {
+        fixedIso += 'Z';
+      }
+      final dt = DateTime.parse(fixedIso).toLocal();
+
+      String formattedDate;
+      if (_dateFormat == 'MM/dd/yyyy') {
+        formattedDate =
+            '${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')}/${dt.year}';
+      } else if (_dateFormat == 'yyyy-MM-dd') {
+        formattedDate =
+            '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+      } else {
+        formattedDate =
+            '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
+      }
+
+      if (_relativeTimestamps) {
+        final now = DateTime.now();
+        final diff = now.difference(dt);
+
+        if (diff.inMinutes < 60) {
+          final min = diff.inMinutes < 0 ? 0 : diff.inMinutes;
+          return min == 0
+              ? loc.translate('history_just_now')
+              : '$min ${loc.translate('history_min_ago')}';
+        }
+        if (diff.inHours < 24)
+          return '${diff.inHours} ${loc.translate('history_hours_ago')}';
+        if (diff.inDays == 1) return loc.translate('history_yesterday');
+        if (diff.inDays < 7)
+          return '${diff.inDays} ${loc.translate('history_days_ago')}';
+      }
+
+      return formattedDate;
     } catch (_) {
       return '';
     }
   }
 
-  // ─── UI ───────────────────────────────────────────────────────────────────
   Widget _buildHistoryItem(Map<String, dynamic> item, int index) {
+    final loc = AppLocalizations.of(context)!;
     final prog = item['progress'];
     final manga = item['manga'];
     final title = item['title'];
@@ -226,7 +276,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
         decoration: BoxDecoration(
-          color: Colors.black,
+          color: YomuColors.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(14),
         ),
         clipBehavior: Clip.antiAlias,
@@ -239,7 +289,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 bottom: 0,
                 child: Container(
                   width: 3,
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     color: YomuColors.secondary,
                     borderRadius: BorderRadius.only(
                       topLeft: Radius.circular(14),
@@ -253,7 +303,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
               padding: EdgeInsets.fromLTRB(isRecent ? 15 : 12, 12, 12, 12),
               child: Row(
                 children: [
-                  // Cover thumbnail
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
                     child: SizedBox(
@@ -272,7 +321,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                       : null,
                                   errorBuilder: (_, __, ___) => Container(
                                     color: YomuColors.surfaceContainerHigh,
-                                    child: const Icon(
+                                    child: Icon(
                                       Icons.broken_image_rounded,
                                       color: YomuColors.outline,
                                       size: 20,
@@ -281,13 +330,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                 )
                               : Container(
                                   color: YomuColors.surfaceContainerHigh,
-                                  child: const Icon(
+                                  child: Icon(
                                     Icons.image_not_supported_rounded,
                                     color: YomuColors.outline,
                                     size: 20,
                                   ),
                                 ),
-                          // Gradient bottom
                           Positioned.fill(
                             child: DecoratedBox(
                               decoration: BoxDecoration(
@@ -296,7 +344,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                   end: Alignment.bottomCenter,
                                   colors: [
                                     Colors.transparent,
-                                    Colors.black.withOpacity(0.5),
+                                    YomuColors.surfaceContainerHigh.withOpacity(
+                                      0.5,
+                                    ),
                                   ],
                                   stops: const [0.5, 1.0],
                                 ),
@@ -309,7 +359,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   ),
                   const SizedBox(width: 14),
 
-                  // Info
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -319,7 +368,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontFamily: 'Manrope',
                             fontWeight: FontWeight.w700,
                             fontSize: 15,
                             color: isRead
@@ -330,9 +378,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                         const SizedBox(height: 5),
                         Row(
                           children: [
-                            // Adesso mostriamo Capitolo e Pagina!
                             Text(
-                              'Cap. $chapNum',
+                              '${loc.translate('history_chapter_short')} $chapNum',
                               style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w600,
@@ -345,14 +392,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             Container(
                               width: 3,
                               height: 3,
-                              decoration: const BoxDecoration(
+                              decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: YomuColors.outlineVariant,
                               ),
                             ),
                             const SizedBox(width: 8),
                             Text(
-                              'Pag. $page',
+                              '${loc.translate('history_page_short')} $page',
                               style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w600,
@@ -365,7 +412,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             Container(
                               width: 3,
                               height: 3,
-                              decoration: const BoxDecoration(
+                              decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: YomuColors.outlineVariant,
                               ),
@@ -373,7 +420,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             const SizedBox(width: 8),
                             Text(
                               lastRead,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 12,
                                 color: YomuColors.onSurfaceVariant,
                               ),
@@ -381,7 +428,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           ],
                         ),
 
-                        // Progress bar (only when in progress)
                         if (!isRead) ...[
                           const SizedBox(height: 10),
                           ClipRRect(
@@ -402,7 +448,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
                   const SizedBox(width: 8),
 
-                  // Play icon
                   Icon(
                     isRead
                         ? Icons.check_circle_rounded
@@ -423,17 +468,18 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final loc = AppLocalizations.of(context)!;
+
     return Scaffold(
       backgroundColor: YomuColors.surface,
       extendBodyBehindAppBar: true,
-
       appBar: AppBar(
         backgroundColor: YomuColors.surface.withOpacity(0.75),
         elevation: 0,
         scrolledUnderElevation: 0,
         surfaceTintColor: Colors.transparent,
         leadingWidth: 56,
-        leading: const Padding(
+        leading: Padding(
           padding: EdgeInsets.only(left: 16),
           child: Icon(
             Icons.menu_book_rounded,
@@ -443,7 +489,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         title: Text(
           'Yomu',
           style: TextStyle(
-            fontFamily: 'Manrope',
             fontWeight: FontWeight.w900,
             fontSize: 24,
             fontStyle: FontStyle.italic,
@@ -455,12 +500,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
         actions: [
           if (_history.isNotEmpty)
             IconButton(
-              icon: const Icon(
+              icon: Icon(
                 Icons.delete_sweep_rounded,
                 color: YomuColors.onSurfaceVariant,
                 size: 22,
               ),
-              tooltip: 'Cancella cronologia',
+              tooltip: loc.translate('history_clear_tooltip'),
               onPressed: () {
                 showDialog(
                   context: context,
@@ -469,16 +514,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16),
                     ),
-                    title: const Text(
-                      'Cancella cronologia',
+                    title: Text(
+                      loc.translate('history_clear_tooltip'),
                       style: TextStyle(
-                        fontFamily: 'Manrope',
                         fontWeight: FontWeight.w800,
                         color: YomuColors.onSurface,
                       ),
                     ),
-                    content: const Text(
-                      'Vuoi davvero rimuovere tutti i progressi di lettura?',
+                    content: Text(
+                      loc.translate('history_clear_confirm'),
                       style: TextStyle(
                         color: YomuColors.onSurfaceVariant,
                         fontSize: 14,
@@ -487,8 +531,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.pop(context),
-                        child: const Text(
-                          'Annulla',
+                        child: Text(
+                          loc.translate('common_cancel'),
                           style: TextStyle(color: YomuColors.onSurfaceVariant),
                         ),
                       ),
@@ -497,8 +541,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           Navigator.pop(context);
                           _clearHistory();
                         },
-                        child: const Text(
-                          'Cancella',
+                        child: Text(
+                          loc.translate('common_clear'),
                           style: TextStyle(color: YomuColors.error),
                         ),
                       ),
@@ -509,7 +553,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
         ],
       ),
-
       body: RefreshIndicator(
         color: YomuColors.primary,
         backgroundColor: YomuColors.surfaceContainerHighest,
@@ -517,17 +560,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
         child: CustomScrollView(
           slivers: [
             const SliverToBoxAdapter(child: SizedBox(height: 100)),
-
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Cronologia',
+                    Text(
+                      loc.translate('history_title'),
                       style: TextStyle(
-                        fontFamily: 'Manrope',
                         fontWeight: FontWeight.w800,
                         fontSize: 32,
                         color: YomuColors.onSurface,
@@ -535,8 +576,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       ),
                     ),
                     const SizedBox(height: 4),
-                    const Text(
-                      'Riprendi da dove ti eri fermato.',
+                    Text(
+                      loc.translate('history_subtitle'),
                       style: TextStyle(
                         fontSize: 14,
                         color: YomuColors.onSurfaceVariant,
@@ -546,7 +587,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 ),
               ),
             ),
-
             if (_isLoading)
               SliverFillRemaining(
                 child: Center(
@@ -565,8 +605,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                         color: YomuColors.onSurfaceVariant.withOpacity(0.4),
                       ),
                       const SizedBox(height: 16),
-                      const Text(
-                        'Accedi per vedere\nla tua cronologia.',
+                      Text(
+                        loc.translate('history_login_prompt'),
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: YomuColors.onSurfaceVariant,
@@ -589,8 +629,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                         color: YomuColors.onSurfaceVariant.withOpacity(0.4),
                       ),
                       const SizedBox(height: 16),
-                      const Text(
-                        'Nessuna lettura recente.\nEsplora e inizia a leggere!',
+                      Text(
+                        loc.translate('history_empty'),
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: YomuColors.onSurfaceVariant,

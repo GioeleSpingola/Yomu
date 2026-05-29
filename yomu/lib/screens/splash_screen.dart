@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:local_auth/local_auth.dart';
+import 'package:flutter/services.dart';
 import 'main_screen.dart';
-import 'auth_screen.dart';
 import '../yomu_colors.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -12,6 +13,8 @@ class SplashScreen extends StatefulWidget {
 }
 
 class _SplashScreenState extends State<SplashScreen> {
+  bool _authFailed = false;
+
   @override
   void initState() {
     super.initState();
@@ -19,43 +22,55 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _checkAuthAndNavigate() async {
-    // 1. Diamo comunque 2 secondi di pausa per far vedere il logo e far
-    // inizializzare tutto correttamente sotto il cofano.
+    setState(() => _authFailed = false);
+    // Diamo 2 secondi di pausa per far vedere il logo
     await Future.delayed(const Duration(milliseconds: 2000));
-
     if (!mounted) return;
 
-    // 2. Chiediamo a Supabase se ha trovato una sessione valida in memoria
-    final session = Supabase.instance.client.auth.currentSession;
+    final prefs = await SharedPreferences.getInstance();
+    final bool useAppLock = prefs.getBool('useAppLock') ?? false;
 
-    // 3. Smistamento intelligente
-    if (session != null) {
-      // C'è una sessione: vai all'app principale
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const MainScreen()),
-      );
-    } else {
-      // Nessuna sessione: vai subito al login
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const AuthScreen()),
-      );
+    if (useAppLock) {
+      final LocalAuthentication auth = LocalAuthentication();
+      try {
+        final bool canAuthenticateWithBiometrics = await auth.canCheckBiometrics;
+        final bool canAuthenticate = canAuthenticateWithBiometrics || await auth.isDeviceSupported();
+
+        if (canAuthenticate) {
+          final bool didAuthenticate = await auth.authenticate(
+            localizedReason: 'Sblocca Yomu per accedere alla tua libreria',
+          );
+
+          if (!didAuthenticate) {
+            // L'utente ha annullato l'impronta
+            if (mounted) setState(() => _authFailed = true);
+            return;
+          }
+        }
+      } on PlatformException catch (e) {
+        debugPrint('Errore biometria: $e');
+      }
     }
+
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (context) => const MainScreen()),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black, // Sfondo scuro
+      backgroundColor: YomuColors.surface,
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
+            Icon(
               Icons.auto_stories,
               size: 80,
-              color: Colors.deepPurpleAccent,
+              color: YomuColors.primary,
             ),
             const SizedBox(height: 24),
             const Text(
@@ -77,7 +92,22 @@ class _SplashScreenState extends State<SplashScreen> {
               ),
             ),
             const SizedBox(height: 50),
-            const CircularProgressIndicator(color: Colors.deepPurpleAccent),
+            if (_authFailed)
+              FilledButton.icon(
+                onPressed: _checkAuthAndNavigate,
+                icon: const Icon(Icons.fingerprint_rounded),
+                label: const Text(
+                  'Riprova a sbloccare',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: YomuColors.primary,
+                  foregroundColor: YomuColors.onPrimary,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+              )
+            else
+              CircularProgressIndicator(color: YomuColors.primary),
           ],
         ),
       ),
