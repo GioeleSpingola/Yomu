@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:fl_chart/fl_chart.dart';
 import '../../yomu_colors.dart';
 import '../../Lingue/app_localizations.dart';
 
@@ -15,9 +14,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
   bool _isLoading = true;
   int _libraryCount = 0;
   int _chaptersRead = 0;
-  int _readingMinutes = 0;
   int _totalReadingMinutes = 0;
-  List<Map<String, dynamic>> _weeklyData = [];
 
   List<MapEntry<String, int>> _topManga = [];
   List<MapEntry<String, int>> _allMangaWithProgress = [];
@@ -37,9 +34,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
       final user = Supabase.instance.client.auth.currentUser;
       if (user == null) return;
 
-      
-
-      // Libreria + top manga
       final libResponse = await Supabase.instance.client
           .from('libreria')
           .select('title, capitoli_letti')
@@ -55,74 +49,33 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
       }
       mangaStats.sort((a, b) => b.value.compareTo(a.value));
 
-      // Capitoli letti (conteggio da progressi)
       final progResponse = await Supabase.instance.client
           .from('progressi')
           .select('id')
           .eq('user_id', user.id);
       final histCount = (progResponse as List).length;
 
-      // Minuti di lettura reali dalla tabella reading_stats
-      int minutes = 0;
+      int realMinutes = 0;
       try {
         final statsRow = await Supabase.instance.client
             .from('reading_stats')
             .select('minuti_lettura')
             .eq('user_id', user.id)
             .maybeSingle();
-        minutes = (statsRow?['minuti_lettura'] as num?)?.toInt() ?? 0;
+        realMinutes = (statsRow?['minuti_lettura'] as num?)?.toInt() ?? 0;
       } catch (_) {}
-
-      final statsResponse = await Supabase.instance.client
-          .from('reading_stats')
-          .select('minuti_lettura')
-          .eq('user_id', user.id)
-          .maybeSingle();
-      
-      final realMinutes = statsResponse != null 
-          ? (statsResponse['minuti_lettura'] as num?)?.toInt() ?? 0 
-          : 0;
-
-      final now = DateTime.now();
-      final sevenDaysAgo = now.subtract(const Duration(days: 6));
-      final fromDate = sevenDaysAgo.toIso8601String().substring(0, 10);
-      List<Map<String, dynamic>> weeklyRaw = [];
-      try {
-        final dailyRows = await Supabase.instance.client
-            .from('daily_stats')
-            .select('date, minutes_read')
-            .eq('user_id', user.id)
-            .gte('date', fromDate)
-            .order('date', ascending: true);
-        final Map<String, int> dateMap = {};
-        for (var row in dailyRows) {
-          dateMap[row['date']] = (row['minutes_read'] as num?)?.toInt() ?? 0;
-        }
-        for (int i = 0; i < 7; i++) {
-          final d = sevenDaysAgo.add(Duration(days: i));
-          final key = d.toIso8601String().substring(0, 10);
-          weeklyRaw.add({'date': d, 'minutes': dateMap[key] ?? 0});
-        }
-      } catch (_) {
-        for (int i = 0; i < 7; i++) {
-          weeklyRaw.add({'date': sevenDaysAgo.add(Duration(days: i)), 'minutes': 0});
-        }
-      }
 
       if (mounted) {
         setState(() {
           _libraryCount = libList.length;
           _chaptersRead = histCount;
-          _readingMinutes = minutes;
           _allMangaWithProgress = mangaStats;
           _topManga = mangaStats.length > 5 ? mangaStats.sublist(0, 5) : mangaStats;
           _totalReadingMinutes = realMinutes;
-          _weeklyData = weeklyRaw;
           _isLoading = false;
         });
       }
     } catch (e) {
-      debugPrint('Errore statistiche: $e');
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -148,7 +101,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     );
   }
 
- @override
+  @override
   Widget build(BuildContext context) {
     final loc = AppLocalizations.of(context)!;
 
@@ -214,10 +167,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                   Icons.schedule_rounded,
                   isWide: true,
                 ),
-                if (_weeklyData.isNotEmpty) ...[
-                  const SizedBox(height: 24),
-                  _buildWeeklyChart(loc),
-                ],
                 if (_topManga.isNotEmpty) ...[
                   const SizedBox(height: 40),
                   Text(
@@ -264,146 +213,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     );
   }
 
-  Widget _buildWeeklyChart(AppLocalizations loc) {
-    final dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    final dayLabelsIt = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'];
-    final isItalian = Localizations.localeOf(context).languageCode == 'it';
-    final labels = isItalian ? dayLabelsIt : dayLabels;
-
-    double maxVal = 1;
-    for (var d in _weeklyData) {
-      final v = (d['minutes'] as num).toDouble();
-      if (v > maxVal) maxVal = v;
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: YomuColors.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.bar_chart_rounded, color: YomuColors.primary, size: 22),
-              const SizedBox(width: 8),
-              Text(
-                loc.translate('stats_weekly_chart'),
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: YomuColors.onSurface,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          SizedBox(
-            height: 180,
-            child: BarChart(
-              BarChartData(
-                alignment: BarChartAlignment.spaceAround,
-                maxY: maxVal * 1.2,
-                minY: 0,
-                barTouchData: BarTouchData(
-                  touchTooltipData: BarTouchTooltipData(
-                    getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                      final mins = rod.toY.toInt();
-                      return BarTooltipItem(
-                        '${mins}m',
-                        TextStyle(
-                          color: YomuColors.onSurface,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 12,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-                titlesData: FlTitlesData(
-                  show: true,
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 32,
-                      getTitlesWidget: (value, meta) {
-                        if (value == 0) return const SizedBox.shrink();
-                        return Text(
-                          '${value.toInt()}',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: YomuColors.onSurfaceVariant,
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      getTitlesWidget: (value, meta) {
-                        final i = value.toInt();
-                        if (i < 0 || i >= _weeklyData.length) return const SizedBox.shrink();
-                        final date = _weeklyData[i]['date'] as DateTime;
-                        final dayIndex = (date.weekday - 1) % 7;
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Text(
-                            labels[dayIndex],
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                              color: YomuColors.onSurfaceVariant,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ),
-                gridData: FlGridData(
-                  show: true,
-                  drawVerticalLine: false,
-                  horizontalInterval: maxVal > 4 ? (maxVal / 4).ceilToDouble() : 1,
-                  getDrawingHorizontalLine: (value) => FlLine(
-                    color: YomuColors.outlineVariant.withValues(alpha: 0.2),
-                    strokeWidth: 1,
-                  ),
-                ),
-                borderData: FlBorderData(show: false),
-                barGroups: List.generate(_weeklyData.length, (i) {
-                  final mins = (_weeklyData[i]['minutes'] as num).toDouble();
-                  final isToday = i == _weeklyData.length - 1;
-                  return BarChartGroupData(
-                    x: i,
-                    barRods: [
-                      BarChartRodData(
-                        toY: mins,
-                        width: 20,
-                        borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
-                        gradient: LinearGradient(
-                          begin: Alignment.bottomCenter,
-                          end: Alignment.topCenter,
-                          colors: isToday
-                              ? [YomuColors.primary, YomuColors.primary.withValues(alpha: 0.7)]
-                              : [YomuColors.primary.withValues(alpha: 0.5), YomuColors.primary.withValues(alpha: 0.25)],
-                        ),
-                      ),
-                    ],
-                  );
-                }),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildPodium() {
     final slots = <int>[];
     if (_topManga.length >= 2) slots.add(1);
@@ -427,7 +236,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Badge posizione
                 Container(
                   width: 28,
                   height: 28,
@@ -448,7 +256,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                   ),
                 ),
                 const SizedBox(height: 6),
-                // Titolo
                 Text(
                   entry.key,
                   textAlign: TextAlign.center,
@@ -462,7 +269,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                   ),
                 ),
                 const SizedBox(height: 6),
-                // Blocco podio
                 Container(
                   height: blockH,
                   decoration: BoxDecoration(
@@ -484,9 +290,9 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                             color: Colors.black87,
                           ),
                         ),
-                        Text(
+                        const Text(
                           'cap.',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 10,
                             color: Colors.black54,
                           ),
@@ -627,9 +433,6 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Bottom sheet – lista completa
-// ═══════════════════════════════════════════════════════════════════════════════
 class _AllMangaSheet extends StatelessWidget {
   final List<MapEntry<String, int>> allManga;
   final Color Function(int) colorForRank;
